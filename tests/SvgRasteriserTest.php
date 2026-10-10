@@ -4,6 +4,7 @@ namespace Restruct\Favicons\Tests;
 
 use Restruct\Favicons\Generator\SvgRasteriser;
 use Restruct\Favicons\Tests\Stub\FavImagickSeamRasteriser;
+use Restruct\Favicons\Tests\Stub\FavThrowingImagickRasteriser;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Dev\SapphireTest;
 
@@ -92,6 +93,52 @@ class SvgRasteriserTest extends SapphireTest
         Config::modify()->set(SvgRasteriser::class, 'rsvg_convert_path', '/nonexistent/rsvg-convert');
         $this->assertNotNull(FavImagickSeamRasteriser::create()->rasterise($this->svg('width="64" height="64"'), 64));
         $this->assertNotSame([], FavImagickSeamRasteriser::$calls);
+    }
+
+    public function testBusyTtlFollowsTheActiveRasteriser()
+    {
+        # Imagick active (no rsvg-convert): its own, longer TTL, configurable
+        Config::modify()->set(SvgRasteriser::class, 'rasterisers', ['rsvg-convert', 'imagick']);
+        Config::modify()->set(SvgRasteriser::class, 'rsvg_convert_path', '/nonexistent/rsvg-convert');
+        $this->assertSame('imagick', FavImagickSeamRasteriser::create()->getAvailable());
+        $this->assertSame(60, FavImagickSeamRasteriser::create()->getBusyTtl());
+        Config::modify()->set(SvgRasteriser::class, 'imagick_busy_ttl', 90);
+        $this->assertSame(90, FavImagickSeamRasteriser::create()->getBusyTtl());
+
+        # rsvg-convert active: just past its deadline
+        if (is_executable('/usr/bin/false') && function_exists('proc_open')) {
+            Config::modify()->set(SvgRasteriser::class, 'rsvg_convert_path', '/usr/bin/false');
+            Config::modify()->set(SvgRasteriser::class, 'rsvg_timeout', 7);
+            $this->assertSame('rsvg-convert', FavImagickSeamRasteriser::create()->getAvailable());
+            $this->assertSame(12, FavImagickSeamRasteriser::create()->getBusyTtl());
+        }
+    }
+
+    /**
+     * ImageMagick resource limits are process-wide: a render must leave them as it found them, also
+     * when it throws, or a long-lived PHP worker keeps throttling every later image operation.
+     */
+    public function testImagickLimitsAreRestoredOnSuccessAndFailure()
+    {
+        if (!SvgRasteriser::create()->imagickCanReadSvg()) {
+            $this->markTestSkipped('needs Imagick with SVG support');
+        }
+        $types = [];
+        foreach (['AREA', 'MEMORY', 'MAP', 'DISK', 'WIDTH', 'HEIGHT'] as $c) {
+            if (defined('Imagick::RESOURCETYPE_' . $c)) {
+                $types[$c] = constant('Imagick::RESOURCETYPE_' . $c);
+            }
+        }
+        $read = fn() => array_map(fn($t) => \Imagick::getResourceLimit($t), $types);
+        Config::modify()->set(SvgRasteriser::class, 'rasterisers', ['imagick']);
+        $svg = $this->svg('width="64" height="64"');
+
+        $before = $read();
+        $this->assertNotNull(SvgRasteriser::create()->rasterise($svg, 128), 'a real render');
+        $this->assertEquals($before, $read(), 'restored after a successful render');
+
+        $this->assertNull(FavThrowingImagickRasteriser::create()->rasterise($svg, 128), 'a render that throws');
+        $this->assertEquals($before, $read(), 'restored after a throwing render');
     }
 
     public function testRasteriseRefusesBeforeRendering()

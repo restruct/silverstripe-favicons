@@ -651,12 +651,13 @@ class FaviconService
         }
         # One render per source at a time: concurrent requests for a source that is being rendered
         # get a fast 404 instead of each starting the same (possibly slow) render. The marker
-        # outlives the rsvg-convert deadline, so a crashed worker cannot block it for long.
+        # outlives the active rasteriser's expected run time (see SvgRasteriser::getBusyTtl()), so a
+        # crashed worker cannot block the source for long.
         $busyKey = 'busy_' . self::GENERATOR_VERSION . '_' . $source->getHash();
         if ($cache->get($busyKey)) {
             return null;
         }
-        $cache->set($busyKey, 1, max(1, (int) SvgRasteriser::config()->get('rsvg_timeout')) + 5);
+        $cache->set($busyKey, 1, SvgRasteriser::singleton()->getBusyTtl());
         try {
             # Rebuild the SVG from an allowlist before ANY rasteriser sees it: the result is published.
             $svg = SvgSanitiser::forRasterising($source->getContents());

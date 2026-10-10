@@ -439,6 +439,7 @@ class FaviconServiceTest extends SapphireTest
         $this->assertNotNull($s->getVariant('icon-192.png'));
         $this->assertCount(1, FavFakeRasteriser::$received);
         $this->assertFalse((bool) $s->getCache()->get($busyKey), 'the marker is cleared after rendering');
+        $this->assertSame(1, FavFakeRasteriser::$busyTtlCalls, 'the marker lifetime comes from the active rasteriser');
     }
 
     public function testUnsafeSvgFailsClosed()

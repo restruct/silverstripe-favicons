@@ -54,6 +54,14 @@ class SvgRasteriser
     private static int $rsvg_timeout = 5;
 
     /**
+     * Seconds the "render in progress" marker lives when Imagick is the active rasteriser. Imagick
+     * cannot be interrupted, so this is a generous guess at its worst case rather than a deadline.
+     *
+     * @config
+     */
+    private static int $imagick_busy_ttl = 60;
+
+    /**
      * Largest output edge rasterise() will produce, px.
      */
     public const MAX_OUTPUT_SIZE = 2048;
@@ -121,6 +129,18 @@ class SvgRasteriser
                 break;
         }
         return ($png !== null && str_starts_with($png, "\x89PNG")) ? $png : null;
+    }
+
+    /**
+     * Lifetime of FaviconService's in-progress marker for the active rasteriser: just past the
+     * rsvg-convert deadline (the process is killed by then), or imagick_busy_ttl for Imagick.
+     */
+    public function getBusyTtl(): int
+    {
+        if ($this->getAvailable() === 'imagick') {
+            return max(1, (int) $this->config()->get('imagick_busy_ttl'));
+        }
+        return max(1, (int) $this->config()->get('rsvg_timeout')) + 5;
     }
 
     public function imagickCanReadSvg(): bool

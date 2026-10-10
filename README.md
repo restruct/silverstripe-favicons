@@ -184,6 +184,15 @@ Before either sees it, the SVG is **rebuilt from an allowlist** (`SvgSanitiser`)
   backslash escapes, `@` rules and any `url()` other than `url(#id)`;
 - comments, processing instructions (`<?xml-stylesheet?>`) and DOCTYPEs are not carried over.
 
+Two consequences for files from design tools:
+
+- **SVG filters are stripped**, so a shape with a filter effect (eg a Figma or Illustrator drop
+  shadow) renders without the effect. Flatten the effect into the artwork, or use a PNG.
+- **An SVG with an entity block is refused.** Older Illustrator "Save As SVG" exports declare
+  entities in a DOCTYPE; re-export with "Preserve Illustrator Editing Capabilities" switched off,
+  or use a PNG. Entity declarations are not accepted on purpose (they are how XML loads files and
+  expands bombs).
+
 An SVG is refused outright on any XML parse error or warning, an entity declaration, a non-`<svg>`
 root, more than 2 MB, more than 50 `#id` references or a reference chain deeper than 3 (a 1 KB
 `<use>` bomb), a reference cycle, a geometry value beyond one million, or a declared width, height
@@ -235,6 +244,7 @@ On `Restruct\Favicons\Generator\SvgRasteriser`:
 | `rasterisers` | `['rsvg-convert', 'imagick']` | Order to try; remove one to rule it out |
 | `rsvg_convert_path` | `'rsvg-convert'` | Binary name (searched) or absolute path |
 | `rsvg_timeout` | `5` | Seconds before rsvg-convert is killed |
+| `imagick_busy_ttl` | `60` | Seconds the in-progress marker lives when Imagick renders (rsvg-convert: `rsvg_timeout` + 5) |
 
 Example with an alias for a probe seen in a 404 log:
 

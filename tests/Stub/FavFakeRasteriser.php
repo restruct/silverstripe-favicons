@@ -20,10 +20,20 @@ class FavFakeRasteriser extends SvgRasteriser implements TestOnly
     /** PNG to return, or null to simulate a failing renderer */
     public static ?string $result = null;
 
+    /** Times FaviconService asked for the in-progress marker lifetime */
+    public static int $busyTtlCalls = 0;
+
     public static function reset(): void
     {
         static::$received = [];
         static::$result = null;
+        static::$busyTtlCalls = 0;
+    }
+
+    public function getBusyTtl(): int
+    {
+        static::$busyTtlCalls++;
+        return parent::getBusyTtl();
     }
 
     public function getAvailable(): ?string
