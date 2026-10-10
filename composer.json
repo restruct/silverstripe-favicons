@@ -27,12 +27,15 @@
     "require-dev": {
         "silverstripe/recipe-testing": "^3 || ^4"
     },
+    "conflict": {
+        "restruct/silverstripe-svg-images": "<3.0"
+    },
     "suggest": {
         "ext-gd": "Resizes PNG sources and rasterised SVGs into the PNG and ICO variants (ext-imagick works too)",
         "ext-imagick": "Rasterises an SVG source into the PNG and ICO variants, when ImageMagick has an SVG delegate",
         "silverstripe/cms": "Adds the icon tags to frontend pages (ContentController)",
         "silverstripe/asset-admin": "Provides the upload field for allow_upload: true",
-        "restruct/silverstripe-svg-images": "Lets the CMS upload field accept SVG as well as PNG"
+        "restruct/silverstripe-svg-images": "3.x: lets the CMS upload field accept (sanitised) SVG as well as PNG"
     },
     "autoload": {
         "psr-4": {

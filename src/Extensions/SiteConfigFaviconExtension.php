@@ -56,7 +56,8 @@ class SiteConfigFaviconExtension extends Extension
             ->setAllowedExtensions($exts)
             ->setAllowedMaxFileNumber(1)
             ->setFolderName((string) $service->config()->get('upload_folder'))
-            ->setDescription($hint . ' ' . $service->getStatusMessage());
+            # The description is rendered as HTML, and the status names the uploaded file.
+            ->setDescription(htmlspecialchars($hint . ' ' . $service->getStatusMessage(), ENT_QUOTES));
 
         # Next to the title and tagline, which is where a site's identity is set.
         # insertAfter() searches nested tabs; when a project removed Tagline, append to Root.Main.

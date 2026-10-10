@@ -92,8 +92,10 @@ class ImageProcessor
         ob_start();
         imagepng($canvas, null, 9);
         $out = (string) ob_get_clean();
-        imagedestroy($src);
-        imagedestroy($canvas);
+        # imagedestroy() has been a no-op since PHP 8.0 (GD images are objects freed when they go out
+        # of scope) and is deprecated in 8.5, where its notice printed into the icon response in dev.
+        // imagedestroy($src);
+        // imagedestroy($canvas);
         return $out;
     }
 

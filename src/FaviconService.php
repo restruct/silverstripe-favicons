@@ -10,6 +10,7 @@ use Psr\SimpleCache\CacheInterface;
 use Restruct\Favicons\Generator\ImageProcessor;
 use Restruct\Favicons\Generator\IcoWriter;
 use Restruct\Favicons\Generator\SvgRasteriser;
+use Restruct\Favicons\Generator\SvgSanitiser;
 use SilverStripe\Assets\File;
 use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Configurable;
@@ -130,7 +131,8 @@ class FaviconService
     private static array $manifest_fields = [
         'name' => null,
         'short_name' => null,
-        'start_url' => '/',
+        # Empty means the site's base URL, so a site in a subdirectory gets the right one.
+        'start_url' => null,
         # 'browser' keeps the site a normal website when added to a home screen; 'standalone' or
         # 'minimal-ui' would make it open like an app, which is a product decision, not an icon one.
         'display' => 'browser',
@@ -188,6 +190,14 @@ class FaviconService
      * scaled down from.
      */
     protected const MASTER_SIZE = 512;
+
+    /**
+     * Seconds a failed generation (unreadable file, renderer error or timeout) is remembered, during
+     * which the bitmap variants are neither linked nor retried.
+     *
+     * @config
+     */
+    private static int $failure_ttl = 600;
 
     /**
      * Logged-once guard per process; the cache keeps it once per source across requests.
@@ -356,7 +366,31 @@ class FaviconService
         if (!$source || !ImageProcessor::isAvailable()) {
             return false;
         }
+        if ($this->hasFailed($source)) {
+            # A recent attempt failed (bad file, renderer timeout): do not advertise or retry the
+            # bitmap variants until the marker expires, so a broken source costs one attempt per
+            # failure_ttl instead of one per request.
+            return false;
+        }
         return !$source->isSvg() || SvgRasteriser::singleton()->getAvailable() !== null;
+    }
+
+    /**
+     * Whether generating bitmaps from this source failed within the last failure_ttl seconds.
+     */
+    public function hasFailed(IconSource $source): bool
+    {
+        return (bool) $this->getCache()->get($this->failureKey($source));
+    }
+
+    protected function markFailed(IconSource $source): void
+    {
+        $this->getCache()->set($this->failureKey($source), 1, max(1, (int) $this->config()->get('failure_ttl')));
+    }
+
+    protected function failureKey(IconSource $source): string
+    {
+        return 'fail_' . self::GENERATOR_VERSION . '_' . $source->getHash();
     }
 
     /**
@@ -460,12 +494,21 @@ class FaviconService
         $extra = (array) $this->config()->get('extra_paths');
         foreach ($extra as $from => $to) {
             if ($to && strtolower(ltrim((string) $from, '/')) === $lower) {
-                # Resolve the target too, so an alias may point at eg apple-touch-icon-precomposed.png
-                $target = strtolower(ltrim((string) $to, '/'));
-                return $target === $lower ? null : $this->resolveRequestPath($target);
+                # Resolved against the built-in names only (so an alias may point at eg
+                # apple-touch-icon-precomposed.png), never against other aliases: alias chains or
+                # cycles (a -> b, b -> a) cannot recurse.
+                return $this->resolveBuiltinPath(strtolower(ltrim((string) $to, '/')));
             }
         }
 
+        return $this->resolveBuiltinPath($lower);
+    }
+
+    /**
+     * The standard names and probe patterns, without extra_paths.
+     */
+    protected function resolveBuiltinPath(string $lower): ?string
+    {
         switch ($lower) {
             case 'favicon.ico':
             case 'icon.svg':
@@ -479,8 +522,12 @@ class FaviconService
         }
 
         if (preg_match('/^apple-touch-icon(?:-(\d{1,4})x(\d{1,4}))?(?:-precomposed)?\.png$/', $lower, $m)) {
-            if (empty($m[1])) {
+            if (!isset($m[1]) || $m[1] === '') {
                 return 'apple-touch-icon.png';
+            }
+            # Devices only ever probe square sizes; 0x0 or 120x152 is a scanner, not a device.
+            if ((int) $m[1] < 1 || $m[1] !== $m[2]) {
+                return null;
             }
             $n = $this->nearest((int) $m[1], $this->getTouchSizes());
             return $n === 180 ? 'apple-touch-icon.png' : "apple-touch-icon-{$n}x{$n}.png";
@@ -541,6 +588,7 @@ class FaviconService
             try {
                 $body = $this->generate($source, $spec);
             } catch (Throwable $e) {
+                $this->markFailed($source);
                 $this->warnOnce('gen:' . $source->getHash() . $name, "Favicon variant {$name} failed: " . $e->getMessage());
                 return null;
             }
@@ -598,9 +646,19 @@ class FaviconService
         if (is_string($png) && $png !== '') {
             return $png;
         }
-        $png = SvgRasteriser::singleton()->rasterise($source->getContents(), self::MASTER_SIZE);
+        if ($this->hasFailed($source)) {
+            return null;
+        }
+        # Strip external references before ANY rasteriser sees the file: the result is published.
+        $svg = SvgSanitiser::forRasterising($source->getContents());
+        $png = $svg === null ? null : SvgRasteriser::singleton()->rasterise($svg, self::MASTER_SIZE);
         if ($png === null) {
-            $this->warnNoRasteriser($source);
+            $this->markFailed($source);
+            if ($svg === null) {
+                $this->warnOnce('unsafe:' . $source->getHash(), 'Favicon source ' . $source->getOrigin() . ' could not be parsed as a safe SVG; only icon.svg is served.');
+            } else {
+                $this->warnNoRasteriser($source);
+            }
             return null;
         }
         $cache->set($key, $png);
@@ -619,7 +677,7 @@ class FaviconService
         $source ??= $this->getSource();
         $cfg = $this->config();
         $fields = array_merge(
-            ['name' => null, 'short_name' => null, 'start_url' => '/', 'display' => 'browser', 'background_color' => null, 'theme_color' => null],
+            ['name' => null, 'short_name' => null, 'start_url' => null, 'display' => 'browser', 'background_color' => null, 'theme_color' => null],
             (array) $cfg->get('manifest_fields')
         );
         $title = '';
@@ -628,6 +686,7 @@ class FaviconService
         }
         $fields['name'] = $fields['name'] ?: $title;
         $fields['short_name'] = $fields['short_name'] ?: $fields['name'];
+        $fields['start_url'] = $fields['start_url'] ?: Director::baseURL();
         $fields['background_color'] = $fields['background_color'] ?: $cfg->get('background_color');
         $fields['theme_color'] = $fields['theme_color'] ?: $cfg->get('theme_color');
 

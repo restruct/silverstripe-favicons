@@ -6,6 +6,7 @@ namespace Restruct\Favicons\Extensions;
 
 use Restruct\Favicons\FaviconService;
 use SilverStripe\Admin\LeftAndMain;
+use SilverStripe\CMS\Controllers\ContentController;
 use SilverStripe\Core\Extension;
 use SilverStripe\Security\Security;
 use SilverStripe\View\Requirements;
@@ -49,6 +50,15 @@ class FaviconHeadTagsExtension extends Extension
         }
         if ($owner instanceof Security) {
             return 'security';
+        }
+        # Without login-forms, Security renders through a Page controller built in
+        # Security::getResponseController() around a throwaway page with URLSegment 'Security' and a
+        # negative random ID (same marker on SS5 and SS6). That is a Security page, not a frontend one.
+        if (class_exists(ContentController::class) && $owner instanceof ContentController) {
+            $record = $owner->data();
+            if ($record && $record->URLSegment === 'Security' && (int) $record->ID < 0) {
+                return 'security';
+            }
         }
         return 'frontend';
     }

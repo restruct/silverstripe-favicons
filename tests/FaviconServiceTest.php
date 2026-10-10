@@ -9,7 +9,10 @@ use Restruct\Favicons\Generator\SvgRasteriser;
 use SilverStripe\Assets\File;
 use SilverStripe\Assets\Image;
 use SilverStripe\Assets\Dev\TestAssetStore;
+use Restruct\Favicons\Tests\Stub\FavFakeRasteriser;
+use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Config;
+use SilverStripe\Core\Injector\Injector;
 use SilverStripe\Dev\SapphireTest;
 use SilverStripe\SiteConfig\SiteConfig;
 
@@ -24,11 +27,16 @@ class FaviconServiceTest extends SapphireTest
         parent::setUp();
         TestAssetStore::activate('FaviconServiceTest');
         $this->pinFaviconConfig();
+        FavFakeRasteriser::reset();
     }
 
     protected function tearDown(): void
     {
+        FavFakeRasteriser::reset();
         TestAssetStore::reset();
+        foreach ($this->tempFiles as $file) {
+            @unlink($file);
+        }
         parent::tearDown();
     }
 
@@ -157,6 +165,9 @@ class FaviconServiceTest extends SapphireTest
         $this->assertSame('apple-touch-icon.png', $s->resolveRequestPath('apple-touch-icon-180x180-precomposed.png'));
         $this->assertSame('apple-touch-icon-120x120.png', $s->resolveRequestPath('apple-touch-icon-57x57.png'));
 
+        $this->assertNull($s->resolveRequestPath('apple-touch-icon-0x0.png'), 'not a device size');
+        $this->assertNull($s->resolveRequestPath('apple-touch-icon-120x152.png'), 'devices probe square sizes only');
+        $this->assertSame('favicon.ico', $s->resolveRequestPath('FAVICON.ICO'), 'case-insensitive');
         $this->assertNull($s->resolveRequestPath('sites/favicon.ico'), 'no aliases by default');
         $this->assertNull($s->resolveRequestPath('apple-touch-icon.jpg'));
         $this->assertNull($s->resolveRequestPath('about-us'));
@@ -174,6 +185,21 @@ class FaviconServiceTest extends SapphireTest
         $this->assertSame('favicon.ico', $s->resolveRequestPath('sites/favicon.ico'));
         $this->assertSame('apple-touch-icon.png', $s->resolveRequestPath('sites/default/files/apple.png'));
         $this->assertNull($s->resolveRequestPath('loop.png'), 'an alias to itself is ignored, not recursed');
+    }
+
+    public function testAliasCyclesDoNotRecurse()
+    {
+        Config::modify()->set(FaviconService::class, 'extra_paths', [
+            'a.ico' => 'b.ico',
+            'b.ico' => 'a.ico',
+            'c.ico' => 'sites/favicon.ico',
+            'sites/favicon.ico' => 'favicon.ico',
+        ]);
+        $s = $this->service();
+        $this->assertNull($s->resolveRequestPath('a.ico'));
+        $this->assertNull($s->resolveRequestPath('b.ico'));
+        $this->assertNull($s->resolveRequestPath('c.ico'), 'aliases resolve against built-in names only, not other aliases');
+        $this->assertSame('favicon.ico', $s->resolveRequestPath('sites/favicon.ico'));
     }
 
     # Variants
@@ -293,6 +319,105 @@ class FaviconServiceTest extends SapphireTest
         $this->assertSame(['image/svg+xml'], array_column($manifest['icons'], 'type'));
     }
 
+    # SVG safety and failure handling
+
+    private function writeTempSvg(string $svg): string
+    {
+        $path = tempnam(sys_get_temp_dir(), 'favsvg') . '.svg';
+        file_put_contents($path, $svg);
+        $this->tempFiles[] = $path;
+        return $path;
+    }
+
+    /** @var string[] */
+    private array $tempFiles = [];
+
+    /**
+     * An SVG that draws a local file into the canvas (the secret is the opaque PNG fixture).
+     */
+    private function evilSvg(): string
+    {
+        return '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512" viewBox="0 0 512 512">'
+            . '<image x="0" y="0" width="512" height="512" xlink:href="' . $this->fixture('icon.png') . '"/>'
+            . '<rect style="fill:url(' . $this->fixture('icon.png') . ')" width="1" height="1"/>'
+            . '</svg>';
+    }
+
+    public function testRasteriserOnlyEverSeesTheSanitisedSvg()
+    {
+        Injector::inst()->registerService(new FavFakeRasteriser(), SvgRasteriser::class);
+        FavFakeRasteriser::$result = file_get_contents($this->fixture('icon.png'));
+        Config::modify()->set(FaviconService::class, 'source', $this->writeTempSvg($this->evilSvg()));
+
+        $this->assertNotNull($this->service()->getVariant('icon-192.png'));
+        $this->assertCount(1, FavFakeRasteriser::$received);
+        $this->assertStringNotContainsString($this->fixture('icon.png'), FavFakeRasteriser::$received[0]);
+        $this->assertStringContainsString('<image', FavFakeRasteriser::$received[0], 'the element stays, only its reference goes');
+        # icon.svg itself is served as stored: browsers do not load references from an <img> icon,
+        # and the response carries a CSP sandbox
+        $this->assertSame($this->evilSvg(), $this->service()->getVariant('icon.svg')['body']);
+    }
+
+    public function testRealRasterisersDoNotDrawReferencedLocalFiles()
+    {
+        $tried = 0;
+        foreach (['rsvg-convert', 'imagick'] as $name) {
+            Config::modify()->set(SvgRasteriser::class, 'rasterisers', [$name]);
+            if (SvgRasteriser::create()->getAvailable() !== $name) {
+                continue;
+            }
+            $tried++;
+            # A fresh source per renderer, so the cached master of the previous one is not reused
+            Config::modify()->set(FaviconService::class, 'source', $this->writeTempSvg($this->evilSvg() . "<!-- $name -->"));
+            $png = $this->service()->getVariant('icon-192.png')['body'] ?? null;
+            if ($png === null) {
+                # A renderer that refuses an empty drawing is fine too: nothing leaked
+                continue;
+            }
+            $im = imagecreatefromstring($png);
+            $centre = imagecolorsforindex($im, imagecolorat($im, 96, 96));
+            $this->assertSame(127, $centre['alpha'], "$name drew the referenced local file");
+        }
+        if (!$tried) {
+            $this->markTestSkipped('No SVG rasteriser on this machine');
+        }
+    }
+
+    public function testFailedGenerationIsCachedAndNotAdvertised()
+    {
+        Injector::inst()->registerService(new FavFakeRasteriser(), SvgRasteriser::class);
+        FavFakeRasteriser::$result = null;
+        Config::modify()->set(FaviconService::class, 'source', $this->fixture('icon.svg'));
+        $s = $this->service();
+
+        $this->assertTrue($s->canRasterise(), 'a rasteriser is available, so the variants are offered at first');
+        $this->assertNull($s->getVariant('favicon.ico'));
+        $this->assertCount(1, FavFakeRasteriser::$received);
+
+        # The failure is remembered: no retry, and the bitmap variants are withdrawn
+        $this->assertFalse($s->canRasterise());
+        $this->assertNull($s->getVariant('favicon.ico'));
+        $this->assertNull($s->getVariant('apple-touch-icon.png'));
+        $this->assertCount(1, FavFakeRasteriser::$received, 'not retried within failure_ttl');
+        $this->assertSame(['icon.svg', 'site.webmanifest'], array_keys($s->getVariants()));
+        $this->assertStringNotContainsString('favicon.ico', $s->getHeadTags());
+        $manifest = json_decode($s->getVariant('site.webmanifest')['body'], true);
+        $this->assertSame(['image/svg+xml'], array_column($manifest['icons'], 'type'));
+    }
+
+    public function testUnsafeSvgFailsClosed()
+    {
+        Injector::inst()->registerService(new FavFakeRasteriser(), SvgRasteriser::class);
+        FavFakeRasteriser::$result = file_get_contents($this->fixture('icon.png'));
+        Config::modify()->set(
+            FaviconService::class,
+            'source',
+            $this->writeTempSvg('<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"><text>&x;</text></svg>')
+        );
+        $this->assertNull($this->service()->getVariant('icon-192.png'));
+        $this->assertSame([], FavFakeRasteriser::$received, 'never handed to a rasteriser');
+    }
+
     # Manifest
 
     public function testManifestDefaultsAndOverrides()
@@ -309,6 +434,7 @@ class FaviconServiceTest extends SapphireTest
         $this->assertSame('Example Site', $json['short_name']);
         $this->assertSame('#ffffff', $json['background_color']);
         $this->assertSame('browser', $json['display']);
+        $this->assertSame('/', $json['start_url']);
         $this->assertArrayNotHasKey('theme_color', $json, 'unset members are left out, not null');
         $this->assertSame(['192x192', '512x512', '512x512'], array_column($json['icons'], 'sizes'));
         $this->assertSame('maskable', $json['icons'][2]['purpose']);
@@ -318,6 +444,18 @@ class FaviconServiceTest extends SapphireTest
         $json = json_decode($this->service()->getVariant('site.webmanifest')['body'], true);
         $this->assertSame('Ex', $json['short_name']);
         $this->assertSame('#123456', $json['theme_color']);
+    }
+
+    public function testManifestStartUrlFollowsTheBaseUrl()
+    {
+        Config::modify()->set(Director::class, 'alternate_base_url', '/sub/');
+        $json = json_decode($this->service()->getVariant('site.webmanifest')['body'], true);
+        $this->assertSame('/sub/', $json['start_url']);
+        $this->assertSame('/sub/icon-192.png', $json['icons'][0]['src']);
+
+        Config::modify()->merge(FaviconService::class, 'manifest_fields', ['start_url' => '/sub/?source=pwa']);
+        $json = json_decode($this->service()->getVariant('site.webmanifest')['body'], true);
+        $this->assertSame('/sub/?source=pwa', $json['start_url']);
     }
 
     public function testManifestCanBeDisabled()

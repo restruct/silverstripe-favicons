@@ -6,6 +6,7 @@ use Restruct\Favicons\FaviconService;
 use Restruct\Favicons\Generator\IcoWriter;
 use Restruct\Favicons\Generator\ImageProcessor;
 use Restruct\Favicons\Generator\SvgRasteriser;
+use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Dev\FunctionalTest;
 
@@ -126,11 +127,30 @@ class FaviconMiddlewareTest extends FunctionalTest
         $this->assertSame(200, $response->getStatusCode());
         $this->assertSame('image/svg+xml', $response->getHeader('Content-Type'));
         $this->assertStringContainsString("default-src 'none'", $response->getHeader('Content-Security-Policy'));
+        $this->assertStringContainsString('sandbox', $response->getHeader('Content-Security-Policy'));
         $this->assertSame(404, $this->get('favicon.ico')->getStatusCode());
         $this->assertSame(404, $this->get('apple-touch-icon.png')->getStatusCode());
         # And a conditional request for a variant that does not exist is not answered with a 304
         $etag = $response->getHeader('ETag');
         $this->assertSame(404, $this->get('favicon.ico', null, ['If-None-Match' => $etag])->getStatusCode());
+    }
+
+    public function testHeadHasNoBodyButKeepsTheLength()
+    {
+        $get = $this->get('favicon.ico');
+        $head = Director::test('favicon.ico', null, $this->session(), 'HEAD');
+        $this->assertSame(200, $head->getStatusCode());
+        $this->assertSame('', (string) $head->getBody());
+        $this->assertSame((string) strlen($get->getBody()), $head->getHeader('Content-Length'));
+        $this->assertSame($get->getHeader('ETag'), $head->getHeader('ETag'));
+    }
+
+    public function testUppercaseProbeIsAnswered()
+    {
+        $response = $this->get('FAVICON.ICO');
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame('image/x-icon', $response->getHeader('Content-Type'));
+        $this->assertSame(404, $this->get('apple-touch-icon-0x0.png')->getStatusCode());
     }
 
     public function testOnlyGetAndHeadAreAnswered()

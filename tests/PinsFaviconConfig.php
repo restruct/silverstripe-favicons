@@ -4,6 +4,7 @@ namespace Restruct\Favicons\Tests;
 
 use Restruct\Favicons\FaviconService;
 use Restruct\Favicons\Generator\SvgRasteriser;
+use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Config;
 
 /**
@@ -30,7 +31,7 @@ trait PinsFaviconConfig
             'manifest_fields' => [
                 'name' => null,
                 'short_name' => null,
-                'start_url' => '/',
+                'start_url' => null,
                 'display' => 'browser',
                 'background_color' => null,
                 'theme_color' => null,
@@ -42,6 +43,7 @@ trait PinsFaviconConfig
             'security_tags' => true,
             'max_age' => 86400,
             'versioned_max_age' => 31536000,
+            'failure_ttl' => 600,
             # Pretend svg-images is absent unless a test says otherwise, whatever the host installed
             'svg_images_class' => 'Restruct\\Favicons\\Tests\\NoSuchClass',
         ];
@@ -51,7 +53,15 @@ trait PinsFaviconConfig
             Config::modify()->set(FaviconService::class, $key, $value);
         }
         Config::modify()->remove(SvgRasteriser::class, 'rasterisers');
-        Config::modify()->set(SvgRasteriser::class, 'rasterisers', ['imagick', 'rsvg-convert']);
+        Config::modify()->set(SvgRasteriser::class, 'rasterisers', ['rsvg-convert', 'imagick']);
         Config::modify()->set(SvgRasteriser::class, 'rsvg_convert_path', 'rsvg-convert');
+        Config::modify()->set(SvgRasteriser::class, 'rsvg_timeout', 5);
+        # Expected URLs are written as /favicon.ico etc.; a host with SS_BASE_URL in a subdirectory
+        # (or a different host name) must not change them.
+        Config::modify()->set(Director::class, 'alternate_base_url', '/');
+
+        # The variant cache is a real filesystem cache that outlives a test: a failure marker or a
+        # generated variant from one test must not decide the next one.
+        FaviconService::singleton()->getCache()->clear();
     }
 }

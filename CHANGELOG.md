@@ -18,5 +18,8 @@ First release (would be 1.0.0).
   headers for versioned URLs, ETag and 304 for bare probes.
 - `<link>` tags on frontend pages, in the CMS (LeftAndMain) and on the Security pages, without
   template changes. Each can be switched off.
-- SVG to PNG with Imagick or `rsvg-convert`; without either an SVG source degrades to serving
-  `icon.svg` only, with one logged warning, a `dev/build` line and a CMS hint.
+- SVG to PNG with `rsvg-convert` (under a deadline) or Imagick (density from the declared size);
+  without either an SVG source degrades to serving `icon.svg` only, with one logged warning, a
+  `dev/build` line and a CMS hint. SVGs are stripped of external references before rasterising,
+  absurd sizes are refused, and failures are remembered for `failure_ttl`.
+- Conflicts with restruct/silverstripe-svg-images below 3.0, which did not sanitise uploads.

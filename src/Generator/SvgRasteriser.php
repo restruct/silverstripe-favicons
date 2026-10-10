@@ -11,10 +11,15 @@ use SilverStripe\Core\Injector\Injectable;
  * Renders an SVG to a PNG, with whatever the server offers. GD cannot read SVG at all, so this
  * tries, in the configured order:
  *
- * - `imagick`: the Imagick extension, when ImageMagick reports an SVG reader (librsvg or its
- *   built-in MSVG renderer);
  * - `rsvg-convert`: the librsvg command-line tool (Debian/Ubuntu package `librsvg2-bin`, Homebrew
- *   `librsvg`), run without a shell, SVG on stdin and PNG on stdout.
+ *   `librsvg`), run without a shell, SVG on stdin and PNG on stdout, under a deadline. First because
+ *   librsvg refuses to load external files from stdin input, and the process can be killed.
+ * - `imagick`: the Imagick extension, when ImageMagick reports an SVG reader (librsvg, its built-in
+ *   MSVG renderer or an Inkscape delegate). Depending on the delegate it follows local file
+ *   references and cannot be interrupted, so it comes second.
+ *
+ * Callers pass SVG that went through SvgSanitiser::forRasterising() (FaviconService does), and
+ * rasterise() refuses SVGs declaring absurd dimensions or asking for an oversized output.
  *
  * When neither is there the module still serves icon.svg and a manifest pointing at it; the PNG
  * and ICO variants are skipped (see FaviconService::canRasterise()).
@@ -30,7 +35,7 @@ class SvgRasteriser
      *
      * @config
      */
-    private static array $rasterisers = ['imagick', 'rsvg-convert'];
+    private static array $rasterisers = ['rsvg-convert', 'imagick'];
 
     /**
      * Name or absolute path of the rsvg-convert binary. A bare name is looked up on PATH and in the
@@ -39,6 +44,25 @@ class SvgRasteriser
      * @config
      */
     private static string $rsvg_convert_path = 'rsvg-convert';
+
+    /**
+     * Seconds rsvg-convert may run before it is killed.
+     *
+     * @config
+     */
+    private static int $rsvg_timeout = 5;
+
+    /**
+     * Largest output edge rasterise() will produce, px.
+     */
+    public const MAX_OUTPUT_SIZE = 2048;
+
+    /**
+     * Declared width/height/viewBox beyond this are refused: real icons are tens to a few thousand
+     * user units, and ImageMagick's work grows with the declared size (a 20000px declaration ran
+     * past two minutes in a measurement).
+     */
+    public const MAX_DECLARED_SIZE = 10000;
 
     /**
      * Name of the first usable rasteriser, or null.
@@ -74,10 +98,18 @@ class SvgRasteriser
      */
     public function rasterise(string $svg, int $size): ?string
     {
+        if ($size < 1 || $size > self::MAX_OUTPUT_SIZE) {
+            return null;
+        }
+        $declared = self::declaredSize($svg);
+        if ($declared === null) {
+            # Unparseable, or dimensions out of range: refuse rather than let a renderer guess.
+            return null;
+        }
         foreach ((array) $this->config()->get('rasterisers') as $name) {
             $png = null;
             if ($name === 'imagick' && $this->imagickCanReadSvg()) {
-                $png = $this->viaImagick($svg, $size);
+                $png = $this->viaImagick($svg, $size, $declared);
             } elseif ($name === 'rsvg-convert' && ($bin = $this->findRsvgConvert())) {
                 $png = $this->viaRsvgConvert($bin, $svg, $size);
             }
@@ -126,14 +158,80 @@ class SvgRasteriser
         return null;
     }
 
-    protected function viaImagick(string $svg, int $size): ?string
+    /**
+     * The SVG's declared size in CSS px (width/height, else the viewBox), [w, h]. Percentages and
+     * missing values fall back to the viewBox, then to 300x150 (the CSS default for replaced
+     * elements). Null when the document cannot be parsed or a dimension is not finite, not positive or
+     * beyond MAX_DECLARED_SIZE.
+     *
+     * @return array{0:float, 1:float}|null
+     */
+    public static function declaredSize(string $svg): ?array
+    {
+        $doc = SvgSanitiser::parse($svg);
+        if (!$doc) {
+            return null;
+        }
+        $root = $doc->documentElement;
+        $vb = preg_split('/[\s,]+/', trim((string) $root->getAttribute('viewBox')));
+        $vbW = (count($vb) === 4 && is_numeric($vb[2])) ? (float) $vb[2] : null;
+        $vbH = (count($vb) === 4 && is_numeric($vb[3])) ? (float) $vb[3] : null;
+        foreach ([$vbW, $vbH] as $v) {
+            if ($v !== null && (!is_finite($v) || $v <= 0 || $v > self::MAX_DECLARED_SIZE)) {
+                return null;
+            }
+        }
+        $w = self::toPx((string) $root->getAttribute('width')) ?? $vbW ?? 300.0;
+        $h = self::toPx((string) $root->getAttribute('height')) ?? $vbH ?? 150.0;
+        foreach ([$w, $h] as $v) {
+            if (!is_finite($v) || $v <= 0 || $v > self::MAX_DECLARED_SIZE) {
+                return null;
+            }
+        }
+        return [$w, $h];
+    }
+
+    /**
+     * A length attribute in px, or null when absent or relative (%, em).
+     */
+    protected static function toPx(string $value): ?float
+    {
+        if (!preg_match('/^\s*([0-9]*\.?[0-9]+(?:e[+-]?[0-9]+)?)\s*(px|pt|pc|mm|cm|in)?\s*$/i', $value, $m)) {
+            return null;
+        }
+        $factor = ['' => 1, 'px' => 1, 'pt' => 4 / 3, 'pc' => 16, 'mm' => 96 / 25.4, 'cm' => 96 / 2.54, 'in' => 96];
+        return (float) $m[1] * $factor[strtolower($m[2] ?? '')];
+    }
+
+    /**
+     * Density (dpi) at which ImageMagick renders an SVG of the declared size to about $target px on
+     * its longest edge. ImageMagick treats SVG user units as px at 96 dpi, so scaling the density
+     * scales the raster; clamped so a tiny or huge declaration cannot ask for an extreme render.
+     *
+     * @param array{0:float, 1:float} $declared
+     */
+    public static function densityFor(array $declared, int $target): float
+    {
+        $longest = max(1.0, $declared[0], $declared[1]);
+        return max(1.0, min(2400.0, 96.0 * $target / $longest));
+    }
+
+    /**
+     * @param array{0:float, 1:float} $declared
+     */
+    protected function viaImagick(string $svg, int $size, array $declared): ?string
     {
         try {
+            # No Imagick::setResourceLimit(RESOURCETYPE_TIME) here: ImageMagick measures that limit from
+            # process start and it is process-wide, so in a long-lived FPM worker it would fail every
+            # later Imagick call (measured: "time limit exceeded" on the next read). The work is
+            # bounded by the declared-size cap and the density instead.
             $im = new \Imagick();
             $im->setBackgroundColor(new \ImagickPixel('transparent'));
-            # Render at a high density so the downscale below has detail to work from; SVGs often
-            # declare a small width/height (eg 32x32) that would otherwise rasterise tiny and blurry.
-            $im->setResolution(384, 384);
+            # Render at the density that makes the raster about the target size: no more work than
+            # needed for a huge declaration, and enough detail for a tiny one (eg width="32").
+            $density = self::densityFor($declared, $size);
+            $im->setResolution($density, $density);
             $im->readImageBlob($svg);
             $im->setImageFormat('png32');
             $im->resizeImage($size, $size, \Imagick::FILTER_LANCZOS, 1, true);
@@ -153,13 +251,72 @@ class SvgRasteriser
         if (!is_resource($proc)) {
             return null;
         }
-        fwrite($pipes[0], $svg);
-        fclose($pipes[0]);
-        $png = stream_get_contents($pipes[1]);
-        fclose($pipes[1]);
-        stream_get_contents($pipes[2]);
-        fclose($pipes[2]);
+        foreach ($pipes as $pipe) {
+            stream_set_blocking($pipe, false);
+        }
+
+        # Feed stdin and drain stdout/stderr together under one deadline: a blocking write could stall
+        # on a full pipe, and a renderer stuck on a pathological file must not hold a PHP worker.
+        $deadline = microtime(true) + max(1, (int) $this->config()->get('rsvg_timeout'));
+        $toWrite = $svg;
+        $png = '';
+        $timedOut = false;
+        $maxOutput = 32 * 1024 * 1024;
+        while (true) {
+            $read = array_filter([$pipes[1] ?? null, $pipes[2] ?? null], 'is_resource');
+            $write = ($toWrite !== '' && is_resource($pipes[0] ?? null)) ? [$pipes[0]] : [];
+            if (!$read && !$write) {
+                break;
+            }
+            $left = $deadline - microtime(true);
+            if ($left <= 0) {
+                $timedOut = true;
+                break;
+            }
+            $except = null;
+            $ready = @stream_select($read, $write, $except, (int) $left, (int) (fmod($left, 1) * 1e6));
+            if ($ready === false) {
+                break;
+            }
+            foreach ($write as $w) {
+                # @: the renderer may exit early and close its stdin, which raises a Broken pipe notice.
+                $n = @fwrite($w, substr($toWrite, 0, 65536));
+                if ($n === false || $n === 0) {
+                    $toWrite = '';
+                } else {
+                    $toWrite = (string) substr($toWrite, $n);
+                }
+                if ($toWrite === '') {
+                    fclose($pipes[0]);
+                    unset($pipes[0]);
+                }
+            }
+            foreach ($read as $r) {
+                $chunk = (string) fread($r, 65536);
+                if ($r === ($pipes[1] ?? null)) {
+                    $png .= $chunk;
+                }
+                if (feof($r)) {
+                    fclose($r);
+                    $key = array_search($r, $pipes, true);
+                    unset($pipes[$key]);
+                }
+            }
+            if (strlen($png) > $maxOutput) {
+                $timedOut = true;
+                break;
+            }
+        }
+
+        if ($timedOut) {
+            proc_terminate($proc, 9);
+        }
+        foreach ($pipes as $pipe) {
+            if (is_resource($pipe)) {
+                fclose($pipe);
+            }
+        }
         $exit = proc_close($proc);
-        return ($exit === 0 && $png) ? $png : null;
+        return (!$timedOut && $exit === 0 && $png !== '') ? $png : null;
     }
 }

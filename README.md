@@ -89,12 +89,15 @@ overrules the configured `source`; removing the upload falls back to it. The fie
 says what is currently being served.
 
 - The field accepts **PNG**, and **SVG as well when
-  [restruct/silverstripe-svg-images](https://github.com/restruct/silverstripe-svg-images) is
+  [restruct/silverstripe-svg-images](https://github.com/restruct/silverstripe-svg-images) 3.x is
   installed** (it makes SVG a sanitised Image upload; core does not allow SVG uploads at all).
+  Versions before 3.0 never sanitised uploads, so `composer.json` declares a conflict with them.
   JPEG is not accepted because an icon needs transparency; WebP and GIF are not, because they would
   only be converted to PNG anyway.
 - Only the **published** file is used: icons are fetched by anonymous visitors. Saving Settings
-  publishes the upload (SiteConfig owns it).
+  publishes the upload (SiteConfig owns it). Once published it is served to everyone at the icon
+  paths, **whatever its CanView setting** in the files area: do not upload anything you would not
+  put on the public site.
 - With `allow_upload: false` (the default) a stored upload is ignored and the field is hidden. The
   database column exists either way, so switching the option never changes the schema.
 
@@ -109,14 +112,16 @@ All paths are relative to the site's base URL. "ETag" responses answer `If-None-
 | `/apple-touch-icon.png` | PNG | 180 | `background_color` | iOS paints transparency black |
 | `/apple-touch-icon-precomposed.png` | same as above | 180 | | legacy iOS probe |
 | `/apple-touch-icon-120x120.png`, `-152x152`, `-167x167`, `-180x180` | PNG | as named | `background_color` | `touch_sizes` |
-| `/apple-touch-icon-NxN[-precomposed].png`, any other N | nearest generated size | | | eg `240x240` gets the 180 |
+| `/apple-touch-icon-NxN[-precomposed].png`, any other N | nearest generated size | | | eg `240x240` gets the 180; `0x0` and non-square names are 404 |
 | `/icon-192.png`, `/icon-512.png` | PNG | 192, 512 | transparent | referenced by the manifest |
 | `/icon-maskable-512.png` | PNG | 512 | `background_color` | `maskable_padding` safe zone |
 | `/site.webmanifest`, `/manifest.json` | web app manifest (JSON) | | | `manifest: true` (default) |
 | anything in `extra_paths` | the variant it maps to | | | eg `sites/favicon.ico` |
 
-The PNG and ICO variants need GD or Imagick, and for an SVG source an SVG rasteriser too. When
-those are missing the variant is simply not served (404) and its tag is left out.
+Paths are matched case-insensitively (`/FAVICON.ICO` works). The PNG and ICO variants need GD or
+Imagick, and for an SVG source an SVG rasteriser too. When those are missing, or generating them
+failed in the last `failure_ttl` seconds, the variant is simply not served (404) and its tag is
+left out.
 
 Tags added to the `<head>` of frontend pages, the CMS and the Security (login) pages:
 
@@ -140,19 +145,34 @@ Tags added to the `<head>` of frontend pages, the CMS and the Security (login) p
   first request; when the cache is cleared (a fresh deploy without a persistent cache directory),
   each variant is regenerated once, which takes milliseconds for a PNG source. Point the cache at
   Redis or Memcached like any other Silverstripe cache to share it between servers.
-- The icon routes run as a request middleware before routing: they start no session and run no
-  page logic, but basic auth and allowed-hosts checks still apply.
+- The icon routes run as a request middleware before routing, so no page logic runs and no new
+  session is started. Core's trusted-proxy, allowed-hosts, session, cache-control, canonical-URL,
+  authentication, basic-auth and password-expiration middleware run before it (so basic auth still
+  protects a staging site's icons); middleware registered after it, such as URL specials, dev-URL
+  confirmation, session-manager's LoginSession and versioned's stage handling, is skipped for icon
+  requests (order listed from a booted SS5 and SS6 install).
 
 ## SVG sources
 
 GD cannot read SVG, so the PNG and ICO variants need a rasteriser. The module tries, in order
 (`rasterisers` config on `Restruct\Favicons\Generator\SvgRasteriser`):
 
-1. **`imagick`**: the Imagick PHP extension, when ImageMagick reports an SVG reader (librsvg, or its
-   built-in MSVG renderer, which draws simple icons fine and complex ones less so).
-2. **`rsvg-convert`**: the librsvg command-line tool (Debian/Ubuntu `librsvg2-bin`, Homebrew
-   `librsvg`), run without a shell. Found on `PATH`, `/usr/bin`, `/usr/local/bin` or
-   `/opt/homebrew/bin`, or set `rsvg_convert_path` to an absolute path. Needs `proc_open`.
+1. **`rsvg-convert`**: the librsvg command-line tool (Debian/Ubuntu `librsvg2-bin`, Homebrew
+   `librsvg`), run without a shell and killed after `rsvg_timeout` seconds. Found on `PATH`,
+   `/usr/bin`, `/usr/local/bin` or `/opt/homebrew/bin`, or set `rsvg_convert_path` to an absolute
+   path. Needs `proc_open`. Preferred because it refuses to load external files and can be killed.
+2. **`imagick`**: the Imagick PHP extension, when ImageMagick reports an SVG reader (librsvg, its
+   built-in MSVG renderer, or an Inkscape delegate). It renders at a density chosen from the SVG's
+   declared size, so the raster is about 512 px whatever the file declares.
+
+Before any rasteriser sees it, the SVG is cleaned: every `href`/`xlink:href` other than `#id` or an
+embedded PNG/JPEG/GIF/WebP data URI is removed, every CSS `url()` other than `url(#id)` becomes
+`none`, `<script>` and `<foreignObject>` are dropped. Some ImageMagick delegates otherwise draw a
+referenced local file (`<image xlink:href="/path/to/file.png">`) into the public PNGs. An SVG that
+does not parse, declares entities, declares a width, height or viewBox over 10000 or is larger than
+2 MB is refused. A failed attempt is remembered for `failure_ttl` seconds (10 minutes) and not
+retried in that time. `/icon.svg` itself is served as stored, with a CSP that blocks scripts and
+loads, plus `sandbox`.
 
 With neither available, an SVG source still serves `/icon.svg` and a manifest pointing at it, which
 modern desktop browsers use; `favicon.ico` and the touch icons are not served. One warning is
@@ -182,10 +202,11 @@ All on `Restruct\Favicons\FaviconService` unless noted.
 | `security_tags` | `true` | Add the tags on Security pages (login, lost password) |
 | `max_age` | `86400` | Cache lifetime for a bare probe, seconds |
 | `versioned_max_age` | `31536000` | Cache lifetime for a `?v=` URL, seconds (sent with `immutable`) |
+| `failure_ttl` | `600` | Seconds a failed generation is remembered (variants withdrawn, not retried) |
 | `svg_images_class` | `'Restruct\Silverstripe\SVG\SVGImage'` | Class whose presence allows SVG uploads |
 
 `manifest_fields` defaults: `name` and `short_name` empty (both fall back to the SiteConfig
-title), `start_url: '/'`, `display: 'browser'` (adding the site to a home screen keeps it a normal
+title), `start_url` empty (the site's base URL, so a subdirectory install works), `display: 'browser'` (adding the site to a home screen keeps it a normal
 website; set `standalone` deliberately if you want app-like behaviour), `background_color` and
 `theme_color` empty (falling back to the options above). Empty members are left out of the JSON.
 
@@ -193,8 +214,9 @@ On `Restruct\Favicons\Generator\SvgRasteriser`:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `rasterisers` | `['imagick', 'rsvg-convert']` | Order to try; remove one to rule it out |
+| `rasterisers` | `['rsvg-convert', 'imagick']` | Order to try; remove one to rule it out |
 | `rsvg_convert_path` | `'rsvg-convert'` | Binary name (searched) or absolute path |
+| `rsvg_timeout` | `5` | Seconds before rsvg-convert is killed |
 
 Example with an alias for a probe seen in a 404 log:
 

@@ -88,7 +88,8 @@ class FaviconMiddleware implements HTTPMiddleware
         $response->addHeader('X-Content-Type-Options', 'nosniff');
         if ($data['type'] === 'image/svg+xml') {
             # An SVG opened directly is a document that could run script; an icon never needs to.
-            $response->addHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
+            # sandbox additionally gives it an opaque origin, so even a CSP bypass reaches no cookies.
+            $response->addHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
         }
         return $response;
     }
