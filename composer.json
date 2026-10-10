@@ -1,0 +1,53 @@
+{
+    "name": "restruct/silverstripe-favicons",
+    "description": "One project icon to every favicon, touch icon and web manifest variant browsers ask for, served at the paths they probe, on the frontend, in the CMS and on the login pages",
+    "type": "silverstripe-vendormodule",
+    "keywords": [
+        "silverstripe",
+        "favicon",
+        "apple-touch-icon",
+        "webmanifest",
+        "icons"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Restruct",
+            "email": "dev@restruct.nl",
+            "homepage": "https://restruct.nl"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "silverstripe/framework": "^5.4 || ^6",
+        "silverstripe/admin": "^2 || ^3",
+        "silverstripe/assets": "^2 || ^3",
+        "silverstripe/siteconfig": "^5.4 || ^6"
+    },
+    "require-dev": {
+        "silverstripe/recipe-testing": "^3 || ^4"
+    },
+    "suggest": {
+        "ext-gd": "Resizes PNG sources and rasterised SVGs into the PNG and ICO variants (ext-imagick works too)",
+        "ext-imagick": "Rasterises an SVG source into the PNG and ICO variants, when ImageMagick has an SVG delegate",
+        "silverstripe/cms": "Adds the icon tags to frontend pages (ContentController)",
+        "silverstripe/asset-admin": "Provides the upload field for allow_upload: true",
+        "restruct/silverstripe-svg-images": "Lets the CMS upload field accept SVG as well as PNG"
+    },
+    "autoload": {
+        "psr-4": {
+            "Restruct\\Favicons\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Restruct\\Favicons\\Tests\\": "tests/"
+        }
+    },
+    "funding": [
+        {
+            "type": "github",
+            "url": "https://github.com/sponsors/restruct"
+        }
+    ]
+}

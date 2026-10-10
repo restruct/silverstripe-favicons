@@ -1,0 +1,48 @@
+---
+Name: restruct-favicons
+After:
+  - '#requestprocessors'
+  - '#coresecurity'
+---
+# Answer /favicon.ico, /apple-touch-icon*.png, /site.webmanifest, /manifest.json etc. before routing.
+# Added after core's request processors, so it runs inside them: allowed-hosts, trusted-proxy and
+# basic-auth checks still apply to icon requests, and HTTPCacheControlMiddleware keeps the
+# Cache-Control header set here (it only adds headers a response does not have yet).
+SilverStripe\Core\Injector\Injector:
+  SilverStripe\Control\Director:
+    properties:
+      Middlewares:
+        FaviconMiddleware: '%$Restruct\Favicons\Control\FaviconMiddleware'
+  # Generated variants and source hashes. Kept out of the in-memory layer (APCu on SS5): the
+  # entries are binary images, only read on a cache miss of the browser/CDN, so memory is better
+  # spent elsewhere. No expiry: keys contain the source version, so stale entries are never read.
+  Psr\SimpleCache\CacheInterface.RestructFavicons:
+    factory: SilverStripe\Core\Cache\CacheFactory
+    constructor:
+      namespace: 'RestructFavicons'
+      defaultLifetime: 0
+      useInMemoryCache: false
+
+SilverStripe\SiteConfig\SiteConfig:
+  extensions:
+    - Restruct\Favicons\Extensions\SiteConfigFaviconExtension
+
+# CMS backend
+SilverStripe\Admin\LeftAndMain:
+  extensions:
+    - Restruct\Favicons\Extensions\FaviconHeadTagsExtension
+
+# Login, lost-password and other Security pages
+SilverStripe\Security\Security:
+  extensions:
+    - Restruct\Favicons\Extensions\FaviconHeadTagsExtension
+
+---
+Name: restruct-favicons-frontend
+Only:
+  classexists: 'SilverStripe\CMS\Controllers\ContentController'
+---
+# Frontend pages. Guarded because silverstripe/cms is only suggested.
+SilverStripe\CMS\Controllers\ContentController:
+  extensions:
+    - Restruct\Favicons\Extensions\FaviconHeadTagsExtension
