@@ -17,12 +17,14 @@ use SilverStripe\Security\Security;
  */
 class HeadTagsTest extends FunctionalTest
 {
+    use PinsFaviconConfig;
+
     protected $usesDatabase = true;
 
     protected function setUp(): void
     {
         parent::setUp();
-        Config::modify()->set(FaviconService::class, 'source', __DIR__ . '/fixtures/icon.png');
+        $this->pinFaviconConfig();
         # Prepended: a merge would append the rule after the CMS catch-all ($URLSegment//$Action),
         # which would claim the URL first and 404 it as a missing page.
         Config::modify()->set(

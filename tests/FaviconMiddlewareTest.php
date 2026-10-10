@@ -14,13 +14,15 @@ use SilverStripe\Dev\FunctionalTest;
  */
 class FaviconMiddlewareTest extends FunctionalTest
 {
+    use PinsFaviconConfig;
+
     # FunctionalTest's session handling and the 404 page path query the database
     protected $usesDatabase = true;
 
     protected function setUp(): void
     {
         parent::setUp();
-        Config::modify()->set(FaviconService::class, 'source', __DIR__ . '/fixtures/icon.png');
+        $this->pinFaviconConfig();
     }
 
     public function testFaviconIcoIsServedWithCacheHeaders()

@@ -12,12 +12,16 @@ use SilverStripe\SiteConfig\SiteConfig;
 
 class SiteConfigFaviconExtensionTest extends SapphireTest
 {
+    use PinsFaviconConfig;
+
     protected $usesDatabase = true;
 
     protected function setUp(): void
     {
         parent::setUp();
-        Config::modify()->set(FaviconService::class, 'svg_images_class', 'Restruct\\Favicons\\Tests\\NoSuchClass');
+        $this->pinFaviconConfig();
+        # Field tests start from "nothing configured", so the status hint is predictable
+        Config::modify()->set(FaviconService::class, 'source', null);
     }
 
     public function testRelationIsDeclaredAndOwned()

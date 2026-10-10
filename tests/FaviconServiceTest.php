@@ -15,16 +15,15 @@ use SilverStripe\SiteConfig\SiteConfig;
 
 class FaviconServiceTest extends SapphireTest
 {
+    use PinsFaviconConfig;
+
     protected $usesDatabase = true;
 
     protected function setUp(): void
     {
         parent::setUp();
         TestAssetStore::activate('FaviconServiceTest');
-        Config::modify()->set(FaviconService::class, 'source', $this->fixture('icon.png'));
-        Config::modify()->set(FaviconService::class, 'allow_upload', false);
-        # Pretend svg-images is absent unless a test says otherwise, whatever the host has installed
-        Config::modify()->set(FaviconService::class, 'svg_images_class', 'Restruct\\Favicons\\Tests\\NoSuchClass');
+        $this->pinFaviconConfig();
     }
 
     protected function tearDown(): void
