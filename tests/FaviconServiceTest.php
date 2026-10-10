@@ -352,7 +352,10 @@ class FaviconServiceTest extends SapphireTest
         $this->assertNotNull($this->service()->getVariant('icon-192.png'));
         $this->assertCount(1, FavFakeRasteriser::$received);
         $this->assertStringNotContainsString($this->fixture('icon.png'), FavFakeRasteriser::$received[0]);
-        $this->assertStringContainsString('<image', FavFakeRasteriser::$received[0], 'the element stays, only its reference goes');
+        # Changed on purpose with the allowlist rewrite (review round 2): an <image> without an embedded
+        # bitmap is left out entirely; the rest of the drawing stays.
+        $this->assertStringNotContainsString('<image', FavFakeRasteriser::$received[0]);
+        $this->assertStringContainsString('<rect', FavFakeRasteriser::$received[0], 'the drawing itself stays');
         # icon.svg itself is served as stored: browsers do not load references from an <img> icon,
         # and the response carries a CSP sandbox
         $this->assertSame($this->evilSvg(), $this->service()->getVariant('icon.svg')['body']);
@@ -403,6 +406,39 @@ class FaviconServiceTest extends SapphireTest
         $this->assertStringNotContainsString('favicon.ico', $s->getHeadTags());
         $manifest = json_decode($s->getVariant('site.webmanifest')['body'], true);
         $this->assertSame(['image/svg+xml'], array_column($manifest['icons'], 'type'));
+    }
+
+    public function testCorruptPngSourceSetsTheFailureMarker()
+    {
+        # Passes the PNG signature sniff, then fails to decode
+        Config::modify()->set(FaviconService::class, 'source', $this->fixture('corrupt.png'));
+        $s = $this->service();
+        $source = $s->getSource();
+        $this->assertNotNull($source);
+        $this->assertFalse($s->hasFailed($source));
+        $this->assertNull($s->getVariant('icon-192.png'));
+        $this->assertTrue($s->hasFailed($source), 'the exception path marks the source as failed');
+        $this->assertFalse($s->canRasterise($source));
+        $this->assertStringNotContainsString('favicon.ico', $s->getHeadTags());
+    }
+
+    public function testConcurrentRenderIsNotStarted()
+    {
+        Injector::inst()->registerService(new FavFakeRasteriser(), SvgRasteriser::class);
+        FavFakeRasteriser::$result = file_get_contents($this->fixture('icon.png'));
+        Config::modify()->set(FaviconService::class, 'source', $this->fixture('icon.svg'));
+        $s = $this->service();
+        # Another request is rendering this source right now
+        $busyKey = 'busy_' . FaviconService::GENERATOR_VERSION . '_' . $s->getSource()->getHash();
+        $s->getCache()->set($busyKey, 1, 60);
+        $this->assertNull($s->getVariant('icon-192.png'), 'fast 404 instead of a second render');
+        $this->assertSame([], FavFakeRasteriser::$received);
+        $this->assertFalse($s->hasFailed($s->getSource()), 'busy is not a failure');
+
+        $s->getCache()->delete($busyKey);
+        $this->assertNotNull($s->getVariant('icon-192.png'));
+        $this->assertCount(1, FavFakeRasteriser::$received);
+        $this->assertFalse((bool) $s->getCache()->get($busyKey), 'the marker is cleared after rendering');
     }
 
     public function testUnsafeSvgFailsClosed()

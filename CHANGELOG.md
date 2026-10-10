@@ -20,6 +20,9 @@ First release (would be 1.0.0).
   template changes. Each can be switched off.
 - SVG to PNG with `rsvg-convert` (under a deadline) or Imagick (density from the declared size);
   without either an SVG source degrades to serving `icon.svg` only, with one logged warning, a
-  `dev/build` line and a CMS hint. SVGs are stripped of external references before rasterising,
-  absurd sizes are refused, and failures are remembered for `failure_ttl`.
+  `dev/build` line and a CMS hint. SVGs are rebuilt from an allowlist before rasterising (no
+  external references, foreign attributes, CSS escapes or `<use>` bombs), only one rasteriser runs
+  (Imagick only where rsvg-convert is absent, under pixel and memory limits), absurd sizes are
+  refused, failures are remembered for `failure_ttl`, and concurrent renders of one source are
+  not started.
 - Conflicts with restruct/silverstripe-svg-images below 3.0, which did not sanitise uploads.

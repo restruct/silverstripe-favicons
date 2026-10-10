@@ -9,14 +9,15 @@ use SilverStripe\Core\Injector\Injectable;
 
 /**
  * Renders an SVG to a PNG, with whatever the server offers. GD cannot read SVG at all, so this
- * tries, in the configured order:
+ * uses the FIRST AVAILABLE of, in the configured order (and never falls through to the next):
  *
  * - `rsvg-convert`: the librsvg command-line tool (Debian/Ubuntu package `librsvg2-bin`, Homebrew
  *   `librsvg`), run without a shell, SVG on stdin and PNG on stdout, under a deadline. First because
  *   librsvg refuses to load external files from stdin input, and the process can be killed.
  * - `imagick`: the Imagick extension, when ImageMagick reports an SVG reader (librsvg, its built-in
  *   MSVG renderer or an Inkscape delegate). Depending on the delegate it follows local file
- *   references and cannot be interrupted, so it comes second.
+ *   references and cannot be interrupted, so it is only the fallback where rsvg-convert is absent,
+ *   and runs under pixel and memory limits.
  *
  * Callers pass SVG that went through SvgSanitiser::forRasterising() (FaviconService does), and
  * rasterise() refuses SVGs declaring absurd dimensions or asking for an oversized output.
@@ -106,19 +107,20 @@ class SvgRasteriser
             # Unparseable, or dimensions out of range: refuse rather than let a renderer guess.
             return null;
         }
-        foreach ((array) $this->config()->get('rasterisers') as $name) {
-            $png = null;
-            if ($name === 'imagick' && $this->imagickCanReadSvg()) {
+        # Exactly ONE rasteriser runs: the first available in the configured order (rsvg-convert by
+        # default). There is deliberately no fall-through: a file rsvg-convert refused or timed out
+        # on is exactly the file not to hand to ImageMagick, whose SVG delegates follow references
+        # and cannot be interrupted. Imagick is therefore only used where rsvg-convert is absent.
+        $png = null;
+        switch ($this->getAvailable()) {
+            case 'rsvg-convert':
+                $png = $this->viaRsvgConvert((string) $this->findRsvgConvert(), $svg, $size);
+                break;
+            case 'imagick':
                 $png = $this->viaImagick($svg, $size, $declared);
-            } elseif ($name === 'rsvg-convert' && ($bin = $this->findRsvgConvert())) {
-                $png = $this->viaRsvgConvert($bin, $svg, $size);
-            }
-            # A rasteriser that is present but fails on this file falls through to the next one.
-            if ($png !== null && str_starts_with($png, "\x89PNG")) {
-                return $png;
-            }
+                break;
         }
-        return null;
+        return ($png !== null && str_starts_with($png, "\x89PNG")) ? $png : null;
     }
 
     public function imagickCanReadSvg(): bool
@@ -221,25 +223,92 @@ class SvgRasteriser
      */
     protected function viaImagick(string $svg, int $size, array $declared): ?string
     {
+        $restore = $this->applyImagickLimits($size);
         try {
-            # No Imagick::setResourceLimit(RESOURCETYPE_TIME) here: ImageMagick measures that limit from
-            # process start and it is process-wide, so in a long-lived FPM worker it would fail every
-            # later Imagick call (measured: "time limit exceeded" on the next read). The work is
-            # bounded by the declared-size cap and the density instead.
-            $im = new \Imagick();
-            $im->setBackgroundColor(new \ImagickPixel('transparent'));
+            # No RESOURCETYPE_TIME limit: ImageMagick measures it from process start and it is
+            # process-wide, so in a long-lived FPM worker it would fail every later Imagick call
+            # (measured: "time limit exceeded" on the next read). Pixel and memory limits are applied
+            # instead (applyImagickLimits), plus the declared-size cap and the density below.
+            $im = $this->createImagick();
+            $im->setBackgroundColor('transparent');
             # Render at the density that makes the raster about the target size: no more work than
             # needed for a huge declaration, and enough detail for a tiny one (eg width="32").
             $density = self::densityFor($declared, $size);
             $im->setResolution($density, $density);
             $im->readImageBlob($svg);
             $im->setImageFormat('png32');
-            $im->resizeImage($size, $size, \Imagick::FILTER_LANCZOS, 1, true);
+            $im->resizeImage($size, $size, defined('Imagick::FILTER_LANCZOS') ? constant('Imagick::FILTER_LANCZOS') : 22, 1, true);
             $png = $im->getImageBlob();
             $im->clear();
             return $png;
         } catch (\Throwable $e) {
             return null;
+        } finally {
+            $this->restoreImagickLimits($restore);
+        }
+    }
+
+    /**
+     * Seam for the tests (they cannot assume ext-imagick): the object viaImagick() drives.
+     *
+     * @return \Imagick
+     */
+    protected function createImagick(): object
+    {
+        return new \Imagick();
+    }
+
+    /**
+     * Cap ImageMagick's pixel cache for this render: width, height, area, memory, map and disk,
+     * whichever this Imagick/ImageMagick (6 or 7) build exposes. The limits are process-wide, so the
+     * previous values are returned for restoreImagickLimits().
+     *
+     * @return array<int, int|float> resource type => previous limit
+     */
+    protected function applyImagickLimits(int $size): array
+    {
+        if (!class_exists(\Imagick::class)) {
+            return [];
+        }
+        $edge = 4 * $size;
+        $limits = [
+            'RESOURCETYPE_WIDTH' => $edge,
+            'RESOURCETYPE_HEIGHT' => $edge,
+            'RESOURCETYPE_AREA' => $edge * $edge,
+            'RESOURCETYPE_MEMORY' => 256 * 1024 * 1024,
+            'RESOURCETYPE_MAP' => 512 * 1024 * 1024,
+            'RESOURCETYPE_DISK' => 1024 * 1024 * 1024,
+        ];
+        $restore = [];
+        foreach ($limits as $const => $limit) {
+            if (!defined('Imagick::' . $const)) {
+                continue;
+            }
+            $type = constant('Imagick::' . $const);
+            try {
+                $restore[$type] = \Imagick::getResourceLimit($type);
+                \Imagick::setResourceLimit($type, $limit);
+            } catch (\Throwable $e) {
+                # A build that rejects one limit still gets the others.
+            }
+        }
+        return $restore;
+    }
+
+    /**
+     * @param array<int, int|float> $restore
+     */
+    protected function restoreImagickLimits(array $restore): void
+    {
+        foreach ($restore as $type => $value) {
+            try {
+                # "Unlimited" comes back as a float at or beyond PHP_INT_MAX, which an int parameter
+                # rejects; PHP_INT_MAX is ImageMagick's unlimited too (measured on IM 7.1.2).
+                $value = (is_float($value) && $value >= PHP_INT_MAX) ? PHP_INT_MAX : (int) $value;
+                \Imagick::setResourceLimit($type, $value);
+            } catch (\Throwable $e) {
+                # Nothing sensible left to do; the next render sets its own limits again.
+            }
         }
     }
 

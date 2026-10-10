@@ -154,25 +154,43 @@ Tags added to the `<head>` of frontend pages, the CMS and the Security (login) p
 
 ## SVG sources
 
-GD cannot read SVG, so the PNG and ICO variants need a rasteriser. The module tries, in order
-(`rasterisers` config on `Restruct\Favicons\Generator\SvgRasteriser`):
+GD cannot read SVG, so the PNG and ICO variants need a rasteriser. The module uses **the first
+available** of (`rasterisers` config on `Restruct\Favicons\Generator\SvgRasteriser`), and never
+falls through to the next one when it fails:
 
 1. **`rsvg-convert`**: the librsvg command-line tool (Debian/Ubuntu `librsvg2-bin`, Homebrew
    `librsvg`), run without a shell and killed after `rsvg_timeout` seconds. Found on `PATH`,
    `/usr/bin`, `/usr/local/bin` or `/opt/homebrew/bin`, or set `rsvg_convert_path` to an absolute
-   path. Needs `proc_open`. Preferred because it refuses to load external files and can be killed.
-2. **`imagick`**: the Imagick PHP extension, when ImageMagick reports an SVG reader (librsvg, its
-   built-in MSVG renderer, or an Inkscape delegate). It renders at a density chosen from the SVG's
-   declared size, so the raster is about 512 px whatever the file declares.
+   path. Needs `proc_open`.
+2. **`imagick`**, only where rsvg-convert is absent: the Imagick PHP extension, when ImageMagick
+   reports an SVG reader. It renders at a density chosen from the SVG's declared size (so the raster
+   is about 512 px whatever the file declares) and under pixel, memory and disk limits, restored
+   afterwards. ImageMagick cannot be given a time limit that is safe in a long-running PHP worker,
+   and which renderer it delegates SVG to (its own MSVG, librsvg, or Inkscape) differs per server
+   and decides what the file can make it do. **Install `rsvg-convert` (`librsvg2-bin`) on servers
+   that render SVG icons**; treat Imagick as the fallback.
 
-Before any rasteriser sees it, the SVG is cleaned: every `href`/`xlink:href` other than `#id` or an
-embedded PNG/JPEG/GIF/WebP data URI is removed, every CSS `url()` other than `url(#id)` becomes
-`none`, `<script>` and `<foreignObject>` are dropped. Some ImageMagick delegates otherwise draw a
-referenced local file (`<image xlink:href="/path/to/file.png">`) into the public PNGs. An SVG that
-does not parse, declares entities, declares a width, height or viewBox over 10000 or is larger than
-2 MB is refused. A failed attempt is remembered for `failure_ttl` seconds (10 minutes) and not
-retried in that time. `/icon.svg` itself is served as stored, with a CSP that blocks scripts and
-loads, plus `sandbox`.
+Before either sees it, the SVG is **rebuilt from an allowlist** (`SvgSanitiser`):
+
+- only SVG-namespace shape, text, structure, gradient, pattern, clip-path and mask elements are
+  kept; scripts, `foreignObject`, animation, filters, fonts and anything in another namespace are
+  left out;
+- only unprefixed attributes are kept, minus event handlers and anything ending in `ref`; prefixed
+  attributes (`xlink:*` apart from a vetted `xlink:href`, `xml:base`, `sodipodi:absref`,
+  `inkscape:*`) are dropped;
+- a reference survives only as a same-document `#id`, or on `<image>` as an embedded PNG, JPEG,
+  GIF or WebP whose bytes match its label;
+- CSS (style attributes, `<style>`, `url()` in presentation attributes) survives only without
+  backslash escapes, `@` rules and any `url()` other than `url(#id)`;
+- comments, processing instructions (`<?xml-stylesheet?>`) and DOCTYPEs are not carried over.
+
+An SVG is refused outright on any XML parse error or warning, an entity declaration, a non-`<svg>`
+root, more than 2 MB, more than 50 `#id` references or a reference chain deeper than 3 (a 1 KB
+`<use>` bomb), a reference cycle, a geometry value beyond one million, or a declared width, height
+or viewBox over 10000. A failed attempt is remembered for `failure_ttl` seconds (10 minutes) and
+not retried in that time, and while one request renders a source, concurrent requests for it get a
+404 instead of starting a second render. `/icon.svg` itself is served as stored (browsers load no
+references from an icon), with a CSP that blocks scripts and loads, plus `sandbox`.
 
 With neither available, an SVG source still serves `/icon.svg` and a manifest pointing at it, which
 modern desktop browsers use; `favicon.ico` and the touch icons are not served. One warning is

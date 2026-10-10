@@ -46,8 +46,14 @@ class SvgSanitiserTest extends SapphireTest
         $this->assertStringNotContainsString('@import', $out);
         $this->assertStringNotContainsString('f.svg', $out);
         $this->assertStringNotContainsString('unterminated', $out);
-        $this->assertStringContainsString('url(#grad)', $out);
         $this->assertStringContainsString('url(#m)', $out);
+        # Behaviour changed on purpose in the allowlist rewrite (review round 2): CSS that contains an
+        # at-rule or a backslash is dropped as a whole instead of being patched, so the style element
+        # above (it has an @import) is gone, url(#grad) with it.
+        $this->assertStringNotContainsString('<style', $out);
+
+        $safe = SvgSanitiser::forRasterising('<svg ' . self::NS . '><style>rect { stroke: url(#grad) }</style><rect/></svg>');
+        $this->assertStringContainsString('url(#grad)', $safe, 'fragment-only CSS stays');
     }
 
     public function testScriptAndForeignObjectAreRemoved()

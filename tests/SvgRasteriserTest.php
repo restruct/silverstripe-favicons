@@ -3,12 +3,25 @@
 namespace Restruct\Favicons\Tests;
 
 use Restruct\Favicons\Generator\SvgRasteriser;
+use Restruct\Favicons\Tests\Stub\FavImagickSeamRasteriser;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Dev\SapphireTest;
 
 class SvgRasteriserTest extends SapphireTest
 {
     protected $usesDatabase = false;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        FavImagickSeamRasteriser::reset();
+    }
+
+    protected function tearDown(): void
+    {
+        FavImagickSeamRasteriser::reset();
+        parent::tearDown();
+    }
 
     private function svg(string $attrs): string
     {
@@ -45,6 +58,40 @@ class SvgRasteriserTest extends SapphireTest
         # Clamped at both ends
         $this->assertSame(2400.0, SvgRasteriser::densityFor([1.0, 1.0], 512));
         $this->assertSame(1.0, SvgRasteriser::densityFor([9999.0, 9999.0], 16));
+    }
+
+    public function testImagickRendersAtTheComputedDensityUnderLimits()
+    {
+        Config::modify()->set(SvgRasteriser::class, 'rasterisers', ['imagick']);
+        $png = FavImagickSeamRasteriser::create()->rasterise($this->svg('width="64" height="64"'), 512);
+        $this->assertNotNull($png);
+        # 64 user units to 512 px is 8x the 96 dpi baseline
+        $this->assertEqualsWithDelta([768.0, 768.0], FavImagickSeamRasteriser::argsOf('setResolution'), 0.001);
+        $this->assertSame([512], FavImagickSeamRasteriser::$limitSizes, 'pixel/memory limits applied for this render');
+        # Density is set BEFORE the SVG is read, or it has no effect
+        $names = array_column(FavImagickSeamRasteriser::$calls, 0);
+        $this->assertLessThan(array_search('readImageBlob', $names), array_search('setResolution', $names));
+
+        FavImagickSeamRasteriser::reset();
+        FavImagickSeamRasteriser::create()->rasterise($this->svg('width="5000" height="5000"'), 512);
+        $this->assertEqualsWithDelta([9.8304, 9.8304], FavImagickSeamRasteriser::argsOf('setResolution'), 0.001);
+    }
+
+    public function testNoFallThroughToImagickWhenRsvgConvertFails()
+    {
+        if (!function_exists('proc_open') || !is_executable('/usr/bin/false')) {
+            $this->markTestSkipped('needs proc_open and /usr/bin/false');
+        }
+        # rsvg-convert is available (a binary that always fails) and Imagick too
+        Config::modify()->set(SvgRasteriser::class, 'rasterisers', ['rsvg-convert', 'imagick']);
+        Config::modify()->set(SvgRasteriser::class, 'rsvg_convert_path', '/usr/bin/false');
+        $this->assertNull(FavImagickSeamRasteriser::create()->rasterise($this->svg('width="64" height="64"'), 64));
+        $this->assertSame([], FavImagickSeamRasteriser::$calls, 'Imagick was never asked');
+
+        # Imagick is used only where rsvg-convert is absent
+        Config::modify()->set(SvgRasteriser::class, 'rsvg_convert_path', '/nonexistent/rsvg-convert');
+        $this->assertNotNull(FavImagickSeamRasteriser::create()->rasterise($this->svg('width="64" height="64"'), 64));
+        $this->assertNotSame([], FavImagickSeamRasteriser::$calls);
     }
 
     public function testRasteriseRefusesBeforeRendering()
