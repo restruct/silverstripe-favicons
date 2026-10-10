@@ -1,0 +1,8 @@
+---
+Name: favicons-browser-fixture
+After: '#restruct-favicons'
+---
+# A PNG source (no SVG rasteriser needed on the CI runner) and the CMS upload switched on.
+Restruct\Favicons\FaviconService:
+  source: 'restruct/silverstripe-favicons:tests/fixtures/icon.png'
+  allow_upload: true

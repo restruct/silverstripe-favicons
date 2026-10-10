@@ -257,6 +257,10 @@ SS_PHPUNIT_FLUSH=1 vendor/bin/phpunit vendor/restruct/silverstripe-favicons/test
 The tests for SVG rasterising skip when the machine has neither Imagick with SVG support nor
 `rsvg-convert`.
 
+Browser tests (Playwright, `tests/browser/`) check that the CMS links the configured icon and that
+a Settings upload replaces it end to end. They run through the maintainers' shared runner, which
+builds one scratch host per Silverstripe major, and in CI through `.github/workflows/browser-tests.yml`.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
