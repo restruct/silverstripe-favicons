@@ -44,7 +44,8 @@ trait PinsFaviconConfig
             'versioned_max_age' => 31536000,
             'failure_ttl' => 600,
             'use_admintweaks' => true,
-            'max_source_size' => 4096,
+            'max_source_size' => 2048,
+            'busy_ttl' => 120,
             'asset_folder' => '_favicons',
         ];
         foreach ($defaults as $key => $value) {

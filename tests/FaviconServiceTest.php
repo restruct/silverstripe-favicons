@@ -139,7 +139,7 @@ class FaviconServiceTest extends SapphireTest
         );
         # Only the header is read, so a header claiming 5000 px is enough to test the upper limit
         $huge = "\x89PNG\r\n\x1a\n" . pack('N', 13) . 'IHDR' . pack('NN', 5000, 5000);
-        $this->assertStringContainsString('at most 4096x4096', (string) $s->checkPng($huge));
+        $this->assertStringContainsString('at most 2048x2048', (string) $s->checkPng($huge));
         Config::modify()->set(FaviconService::class, 'max_source_size', 0);
         $this->assertNull($s->checkPng($huge), 'max_source_size 0 disables the upper limit');
     }
@@ -607,6 +607,13 @@ class FaviconServiceTest extends SapphireTest
         $this->assertSame(1, count(array_keys(FavSpyBackend::$widths, 1024)), 'the 1024 px source is decoded once');
         $this->assertSame([], array_filter(FavSpyBackend::$widths, fn($w) => $w > 512 && $w !== 1024), 'nothing larger than needed is drawn');
         $this->assertSame([512, 512], FaviconService::pngDimensions((string) $this->read('icon-512.png')));
+        $s = $this->service();
+        $set = $s->getCompletedSet();
+        $this->assertSame(
+            [512, 512],
+            FaviconService::pngDimensions((string) $s->getStore()->getAsString($s->setPath($set['id'], 'icon.png'), $set['src'])),
+            'the stored copy is the shrunk source'
+        );
     }
 
     public function testMetadataOfTheSourceIsNotPublished()
