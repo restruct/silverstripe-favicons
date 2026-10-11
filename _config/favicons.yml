@@ -14,20 +14,28 @@ SilverStripe\Core\Injector\Injector:
       Middlewares:
         FaviconMiddleware: '%$Restruct\Favicons\Control\FaviconMiddleware'
   # Source hashes and checks, the registry of generated sets, busy and failure markers. The
-  # images themselves live in the AssetStore. Kept out of the in-memory layer (APCu on SS5) so
-  # every process sees the same registry. No expiry: keys contain the content hash, so stale
+  # images themselves live in the AssetStore. No expiry: keys contain the content hash, so stale
   # entries are never read.
-  # disable-container: versioned otherwise segments this cache by reading mode. The icon
-  # middleware runs before VersionedMiddleware (no mode), pages read Live, the CMS and dev/build
-  # Stage: each would see its own registry, so a set generated in one was invisible to the others
-  # and never cleaned up by them. Nothing here depends on the stage.
+  #
+  # A plain filesystem pool under TEMP_PATH rather than CacheFactory, because this cache must be
+  # ONE store for every process and stage:
+  # - CacheFactory on Silverstripe 5 picks PhpFilesAdapter where opcache is on (usually the web
+  #   server) and FilesystemAdapter where it is off (usually the CLI), so a set generated on
+  #   dev/build was invisible to the site (seen in CI: no tags after a fresh build).
+  # - CacheFactory's versioned wrapper segments by reading mode: the icon middleware runs before
+  #   VersionedMiddleware, pages read Live, the CMS and dev/build Stage, so each saw its own
+  #   registry and never cleaned up the others' sets.
+  # Override this service (eg with a Redis pool) to share it between web servers.
   Psr\SimpleCache\CacheInterface.RestructFavicons:
-    factory: SilverStripe\Core\Cache\CacheFactory
+    class: Symfony\Component\Cache\Psr16Cache
+    constructor:
+      pool: '%$RestructFaviconsCachePool'
+  RestructFaviconsCachePool:
+    class: Symfony\Component\Cache\Adapter\FilesystemAdapter
     constructor:
       namespace: 'RestructFavicons'
       defaultLifetime: 0
-      useInMemoryCache: false
-      disable-container: true
+      directory: '`TEMP_PATH`'
 
 SilverStripe\SiteConfig\SiteConfig:
   extensions:

@@ -202,8 +202,10 @@ permissions, a remote error, `dev/build` run as another user than the web server
 stay behind with one logged warning; nothing else is affected.
 
 Which sets exist is remembered in the module's cache
-(`Psr\SimpleCache\CacheInterface.RestructFavicons`), shared by all stages (it is not segmented by
-silverstripe/versioned, so dev/build, the CMS and the site see the same sets). If that cache is
+(`Psr\SimpleCache\CacheInterface.RestructFavicons`): a plain filesystem pool under `TEMP_PATH`,
+deliberately not created through Silverstripe's `CacheFactory`, so `dev/build` on the command line,
+the CMS and the site all read the same entries (the factory picks a different adapter for CLI and
+web on Silverstripe 5, and segments by stage with silverstripe/versioned). If that cache is
 cleared, the set it named is no longer known: it is left behind when the next one is generated (a
 few small files), and the tags disappear until the next icon request or `dev/build` re-registers
 it. Delete `assets/_favicons/` (or that prefix in your bucket) to remove leftovers. On several web

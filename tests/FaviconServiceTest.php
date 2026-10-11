@@ -545,6 +545,10 @@ class FaviconServiceTest extends SapphireTest
 
     public function testRegistryIsSharedAcrossReadingModes()
     {
+        # One filesystem pool for CLI and web: CacheFactory would pick a different adapter per SAPI
+        # on Silverstripe 5 (PhpFiles with opcache, Filesystem without) and wrap it per stage
+        $this->assertInstanceOf(\Symfony\Component\Cache\Psr16Cache::class, $this->service()->getCache());
+
         # dev/build and the CMS run in Stage, pages in Live, the icon middleware before any reading
         # mode is set: all must see the same registry
         Versioned::withVersionedMode(function () {
