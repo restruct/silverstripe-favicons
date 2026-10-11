@@ -18,7 +18,8 @@ First release (would be 1.0.0).
 - Generated variants: `favicon.ico` (16/32/48, PNG entries), opaque `apple-touch-icon.png` (180)
   plus 120/152/167/180 size variants, `icon-192.png`, `icon-512.png`, a maskable 512 with a
   safe-zone margin, and a web manifest. Drawn through the framework's own `Image_Backend` (via
-  `DBFile::manipulateImage()`), with no GD or Imagick calls in the module.
+  `DBFile::manipulate()`, from one decode of the source per set), with no GD or Imagick calls in
+  the module.
 - Stored in the framework AssetStore under `_favicons/<set>/` (public, no File records, works with
   remote adapters), keyed on the source content and config; the stored source is re-encoded (no
   metadata chunks published); the previous set is deleted once a new one is complete, and a
