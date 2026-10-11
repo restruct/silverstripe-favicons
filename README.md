@@ -208,15 +208,37 @@ the CMS and the site all read the same entries (the factory picks a different ad
 web on Silverstripe 5, and segments by stage with silverstripe/versioned). If that cache is
 cleared, the set it named is no longer known: it is left behind when the next one is generated (a
 few small files), and the tags disappear until the next icon request or `dev/build` re-registers
-it. Delete `assets/_favicons/` (or that prefix in your bucket) to remove leftovers. On several web
-servers with a shared remote store, point that cache at a shared backend (Redis, Memcached) like
-any other Silverstripe cache, so every server knows the same sets.
+it. Delete `assets/_favicons/` (or that prefix in your bucket) to remove leftovers.
+
+**Several web servers sharing one remote store:** override that service with a shared pool (Redis,
+Memcached), so every server reads the same registry. With the default per-server pool it still
+works, at three costs:
+
+- each server decodes the source once to build its own registry entry (the stored files themselves
+  are reused: variants that exist are not redrawn);
+- a server shows no icon tags until its first icon request or `dev/build`;
+- servers with different libgd versions may encode `icon.png` differently. The first copy stored
+  is kept (`CONFLICT_USE_EXISTING`) and the others adopt it, so they do not overwrite each other,
+  but a server that built its set before the other one existed keeps its own copy until the set
+  changes.
+
+The build lock (one build per set at a time) is a file in each server's `TEMP_PATH`, so it only
+coordinates the requests of one server.
 
 ### Memory
 
-Generation decodes the source once, through the image backend. GD's bitmap memory is not counted
-against PHP's `memory_limit`, so watch the process size instead. Peak process size (RSS) of one
-generation, measured on PHP 8.3 with the default GD driver:
+Generation decodes the source once, through the image backend. Whether that bitmap counts against
+PHP's `memory_limit` depends on how GD was built:
+
+- **PHP's bundled libgd** (`gd_info()` reports "bundled", as in the official Docker images):
+  libgd allocates through PHP's own allocator (php-src `ext/gd/libgd/gdhelpers.h` maps `gdMalloc`
+  to `emalloc`), so the decode counts against `memory_limit` and a too-large source ends in a
+  memory-limit fatal (remembered for `failure_ttl`).
+- **An external libgd** (most distribution and Homebrew packages): its memory is invisible to
+  `memory_limit`, so only the process size grows.
+
+Peak process size (RSS) of one generation, measured on PHP 8.3 with Homebrew's external libgd
+2.3.3 and the default GD driver:
 
 | Source | Silverstripe 5 | Silverstripe 6 |
 |---|---|---|

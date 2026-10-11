@@ -28,6 +28,9 @@ First release (would be 1.0.0).
   request, one build at a time and from a single decode of the source; never during a page render.
   Pages carry no icon tags until a set exists, and an error in the tag code leaves the tags out
   instead of breaking the page. `max_source_size` defaults to 2048 px.
+- One build per set at a time through an atomic lock file in `TEMP_PATH` (`busy_ttl`, stale locks
+  taken over); stored set files are written with `CONFLICT_USE_EXISTING`, so servers with
+  different libgd builds do not overwrite each other.
 - Served at the paths browsers probe, streamed from the AssetStore, including every
   `apple-touch-icon[-NxN][-precomposed].png` name (nearest generated size), `/manifest.json`, and
   any `extra_paths` aliases. Long-lived cache headers for versioned URLs, ETag and 304 for bare
