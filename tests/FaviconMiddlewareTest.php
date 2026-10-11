@@ -4,9 +4,9 @@ namespace Restruct\Favicons\Tests;
 
 use Restruct\Favicons\FaviconService;
 use Restruct\Favicons\Generator\IcoWriter;
-use Restruct\Favicons\Generator\ImageProcessor;
-use Restruct\Favicons\Generator\SvgRasteriser;
+use SilverStripe\Assets\Dev\TestAssetStore;
 use SilverStripe\Control\Director;
+use SilverStripe\Control\HTTPStreamResponse;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Dev\FunctionalTest;
 
@@ -23,7 +23,14 @@ class FaviconMiddlewareTest extends FunctionalTest
     protected function setUp(): void
     {
         parent::setUp();
+        TestAssetStore::activate('FaviconMiddlewareTest');
         $this->pinFaviconConfig();
+    }
+
+    protected function tearDown(): void
+    {
+        TestAssetStore::reset();
+        parent::tearDown();
     }
 
     public function testFaviconIcoIsServedWithCacheHeaders()
@@ -68,7 +75,7 @@ class FaviconMiddlewareTest extends FunctionalTest
     public function testEtagChangesWithTheSource()
     {
         $before = $this->get('favicon.ico')->getHeader('ETag');
-        Config::modify()->set(FaviconService::class, 'source', __DIR__ . '/fixtures/small.png');
+        Config::modify()->set(FaviconService::class, 'source', __DIR__ . '/fixtures/icon2.png');
         $after = $this->get('favicon.ico')->getHeader('ETag');
         $this->assertNotSame($before, $after);
     }
@@ -92,7 +99,7 @@ class FaviconMiddlewareTest extends FunctionalTest
             $response = $this->get($path);
             $this->assertSame(200, $response->getStatusCode(), $path);
             $this->assertSame('image/png', $response->getHeader('Content-Type'), $path);
-            $this->assertSame([$size, $size], ImageProcessor::dimensions($response->getBody()), $path);
+            $this->assertSame([$size, $size], FaviconService::pngDimensions((string) $response->getBody()), $path);
         }
 
         foreach (['manifest.json', 'site.webmanifest'] as $path) {
@@ -119,20 +126,35 @@ class FaviconMiddlewareTest extends FunctionalTest
         $this->assertSame(404, $this->get('manifest.json')->getStatusCode());
     }
 
-    public function testSvgOnlyServerServesSvgAnd404sTheRest()
+    public function testUndecodableSourceServesTheManifestAnd404sTheRest()
     {
-        Config::modify()->set(FaviconService::class, 'source', __DIR__ . '/fixtures/icon.svg');
-        Config::modify()->set(SvgRasteriser::class, 'rasterisers', []);
-        $response = $this->get('icon.svg');
-        $this->assertSame(200, $response->getStatusCode());
-        $this->assertSame('image/svg+xml', $response->getHeader('Content-Type'));
-        $this->assertStringContainsString("default-src 'none'", $response->getHeader('Content-Security-Policy'));
-        $this->assertStringContainsString('sandbox', $response->getHeader('Content-Security-Policy'));
+        Config::modify()->set(FaviconService::class, 'source', __DIR__ . '/fixtures/truncated.png');
         $this->assertSame(404, $this->get('favicon.ico')->getStatusCode());
         $this->assertSame(404, $this->get('apple-touch-icon.png')->getStatusCode());
-        # And a conditional request for a variant that does not exist is not answered with a 304
-        $etag = $response->getHeader('ETag');
+        $manifest = $this->get('site.webmanifest');
+        $this->assertSame(200, $manifest->getStatusCode());
+        # And a conditional request for a variant that cannot be served is not answered with a 304
+        $etag = $manifest->getHeader('ETag');
         $this->assertSame(404, $this->get('favicon.ico', null, ['If-None-Match' => $etag])->getStatusCode());
+        $this->assertSame(404, $this->get('favicon.ico', null, ['If-None-Match' => '*'])->getStatusCode());
+    }
+
+    public function testImagesAreStreamedFromTheAssetStore()
+    {
+        $response = $this->get('icon-512.png');
+        $this->assertInstanceOf(HTTPStreamResponse::class, $response);
+        $body = (string) $response->getBody();
+        $this->assertSame((string) strlen($body), $response->getHeader('Content-Length'));
+        $this->assertNull($response->getHeader('Location'), 'served, not redirected');
+
+        $service = FaviconService::singleton();
+        $set = $service->ensureSet($service->getSource());
+        $stored = $service->getStore()->getAsString(
+            $service->setPath($set['id'], 'icon.png'),
+            $set['src'],
+            $service->variantName($service->getVariants()['icon-512.png'])
+        );
+        $this->assertSame($stored, $body);
     }
 
     public function testHeadHasNoBodyButKeepsTheLength()

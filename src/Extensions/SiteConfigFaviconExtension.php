@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Restruct\Favicons\Extensions;
 
 use Restruct\Favicons\FaviconService;
+use Restruct\Favicons\Forms\IconUploadValidator;
 use SilverStripe\AssetAdmin\Forms\UploadField;
+use SilverStripe\Assets\File;
 use SilverStripe\Assets\Image;
 use SilverStripe\Core\Extension;
 use SilverStripe\Forms\FieldList;
@@ -47,22 +49,77 @@ class SiteConfigFaviconExtension extends Extension
             return;
         }
 
-        $exts = FaviconService::allowedUploadExtensions();
-        $hint = in_array('svg', $exts, true)
-            ? _t(__CLASS__ . '.UPLOAD_HINT_SVG', 'SVG or PNG (square, at least 512x512 px). Overrides the icon set in the site configuration.')
-            : _t(__CLASS__ . '.UPLOAD_HINT_PNG', 'PNG (square, at least 512x512 px, transparent background). Overrides the icon set in the site configuration.');
+        $hint = _t(
+            __CLASS__ . '.UPLOAD_HINT',
+            'PNG, square, at least {min}x{min} px, preferably with a transparent background. Overrides the icon set in the site configuration.',
+            ['min' => FaviconService::MIN_SOURCE_SIZE]
+        );
 
         $field = UploadField::create('FaviconSource', _t(__CLASS__ . '.FaviconSource', 'Site icon (favicon)'))
-            ->setAllowedExtensions($exts)
+            ->setAllowedExtensions(FaviconService::allowedUploadExtensions())
             ->setAllowedMaxFileNumber(1)
             ->setFolderName((string) $service->config()->get('upload_folder'))
+            # Picking an existing file from the library skips upload validation, so only uploading
+            # is offered; validateFaviconSource() below still checks whatever ends up saved.
+            ->setAttachEnabled(false)
             # The description is rendered as HTML, and the status names the uploaded file.
             ->setDescription(htmlspecialchars($hint . ' ' . $service->getStatusMessage(), ENT_QUOTES));
+        # Square PNG of at least 512 px, checked at upload time on top of the field's own checks.
+        $upload = $field->getUpload();
+        if (!$upload->getValidator() instanceof IconUploadValidator) {
+            $upload->setValidator(new IconUploadValidator($upload->getValidator()));
+        }
 
         # Next to the title and tagline, which is where a site's identity is set.
         # insertAfter() searches nested tabs; when a project removed Tagline, append to Root.Main.
         if (!$fields->dataFieldByName('Tagline') || !$fields->insertAfter('Tagline', $field, false)) {
             $fields->addFieldToTab('Root.Main', $field);
+        }
+    }
+
+    /**
+     * Silverstripe 5 name of the validation hook. Framework 6 renamed it, see updateValidate().
+     *
+     * @param \SilverStripe\ORM\ValidationResult $result
+     */
+    protected function validate($result): void
+    {
+        $this->validateFaviconSource($result);
+    }
+
+    /**
+     * Silverstripe 6 name of the same hook.
+     *
+     * @param \SilverStripe\Core\Validation\ValidationResult $result
+     */
+    protected function updateValidate($result): void
+    {
+        $this->validateFaviconSource($result);
+    }
+
+    /**
+     * Refuse saving a newly chosen icon that cannot be used. Backs up the upload validator for files
+     * that reach the relation another way (an API, a migration, a form without that validator).
+     * Only a changed relation is checked, so an older unusable file never blocks unrelated edits.
+     *
+     * @param object $result ValidationResult (namespace differs between Silverstripe 5 and 6)
+     */
+    protected function validateFaviconSource($result): void
+    {
+        $owner = $this->getOwner();
+        $id = (int) $owner->FaviconSourceID;
+        if (!$id || !$owner->isChanged('FaviconSourceID') || !FaviconService::config()->get('allow_upload')) {
+            return;
+        }
+        $file = File::get()->byID($id);
+        $stream = $file ? $file->getStream() : null;
+        $head = is_resource($stream) ? (string) fread($stream, 64) : '';
+        if (is_resource($stream)) {
+            fclose($stream);
+        }
+        $error = FaviconService::singleton()->checkPng($head);
+        if ($error !== null) {
+            $result->addFieldError('FaviconSource', $error);
         }
     }
 
@@ -83,16 +140,41 @@ class SiteConfigFaviconExtension extends Extension
     }
 
     /**
-     * One dev/build line saying what is being served, so a missing rasteriser or source is noticed
-     * at deploy time rather than in the 404 log.
+     * Generate the set as soon as the icon changes in the CMS, so the next page already links it.
+     * Only when a source relation changed: other Settings edits do not cost a check of the store.
+     * The upload itself is usually still a draft here (Settings publishes it after writing), which
+     * onAfterPublishRecursive() below covers.
+     */
+    protected function onAfterWrite(): void
+    {
+        $owner = $this->getOwner();
+        if ($owner->isChanged('FaviconSourceID') || ($owner->hasField('FavIconID') && $owner->isChanged('FavIconID'))) {
+            FaviconService::singleton()->warmUp();
+        }
+    }
+
+    /**
+     * Saving Settings publishes what SiteConfig owns (SS5 SiteConfigLeftAndMain, SS6 versioned's
+     * RecursivePublishableHandler), after which a new upload is live and can be generated.
+     * warmUp() is a cache read when the set already exists.
+     */
+    protected function onAfterPublishRecursive(): void
+    {
+        FaviconService::singleton()->warmUp();
+    }
+
+    /**
+     * One dev/build line saying what is being served, so an unusable source is noticed at deploy
+     * time rather than in the 404 log. The set is generated first, so the first visitor after a
+     * deploy does not pay for it.
      */
     protected function reportStatus(): void
     {
         $service = FaviconService::singleton();
-        $source = $service->getSource();
-        # Red only for a source that is set but cannot be fully served; "nothing configured yet" is a
+        $service->warmUp();
+        $message = $service->getStatusMessage();
+        # Red only for a source that is set but not (fully) used; "nothing configured yet" is a
         # normal state right after installing.
-        $degraded = $source && !$service->canRasterise($source);
-        DB::alteration_message('Favicons: ' . $service->getStatusMessage(), $degraded ? 'error' : 'notice');
+        DB::alteration_message('Favicons: ' . $message, $service->isDegraded() ? 'error' : 'notice');
     }
 }

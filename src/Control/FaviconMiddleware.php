@@ -7,6 +7,7 @@ namespace Restruct\Favicons\Control;
 use Restruct\Favicons\FaviconService;
 use SilverStripe\Control\HTTPRequest;
 use SilverStripe\Control\HTTPResponse;
+use SilverStripe\Control\HTTPStreamResponse;
 use SilverStripe\Control\Middleware\HTTPMiddleware;
 use SilverStripe\Core\Injector\Injectable;
 
@@ -19,8 +20,12 @@ use SilverStripe\Core\Injector\Injectable;
  * rules match fixed segments only. It also keeps icon requests out of controller init, so they do
  * not start sessions or run page logic.
  *
- * A path the current source cannot produce (eg favicon.ico from an SVG on a server without a
- * rasteriser) is passed on, so it 404s through the normal stack and 404 logging still sees it.
+ * The files are streamed from the AssetStore, where FaviconService keeps the generated set, rather
+ * than redirected to: a redirect would cost every probe an extra round trip, and some clients do not
+ * follow redirects for icons at all.
+ *
+ * A path the current source cannot produce (no usable source, or a PNG the image backend cannot
+ * decode) is passed on, so it 404s through the normal stack and 404 logging still sees it.
  *
  * A physical file in the webroot (public/favicon.ico) is served by the web server before
  * Silverstripe runs at all, and wins over this middleware.
@@ -62,35 +67,52 @@ class FaviconMiddleware implements HTTPMiddleware
         $maxAge = (int) $service->config()->get($isVersioned ? 'versioned_max_age' : 'max_age');
         $cacheControl = 'public, max-age=' . $maxAge . ($isVersioned ? ', immutable' : '');
 
-        # Answer a conditional request before generating anything.
+        # Answer a conditional request without reading the file.
         $ifNoneMatch = (string) $request->getHeader('If-None-Match');
         if ($ifNoneMatch !== '' && $this->etagMatches($ifNoneMatch, $etag)) {
-            # Only answer 304 for a variant that exists; otherwise fall through to a 404.
-            if (!array_key_exists($variant, $service->getVariants($source))) {
+            # Only answer 304 for a variant that can be served; otherwise fall through to a 404.
+            if (!$service->canServe($variant)) {
                 return null;
             }
             $response = HTTPResponse::create('', 304);
+            # Not required on a 304, but some proxies log or cache by it.
+            $type = $service->getVariants()[$variant]['type'] ?? null;
+            if ($type) {
+                $response->addHeader('Content-Type', $type);
+            }
             $response->addHeader('ETag', $etag);
             $response->addHeader('Cache-Control', $cacheControl);
             return $response;
         }
 
-        $data = $service->getVariant($variant);
+        $data = $service->openVariant($variant);
         if ($data === null) {
             return null;
         }
 
-        $response = HTTPResponse::create($request->httpMethod() === 'HEAD' ? '' : $data['body'], 200);
+        if (isset($data['stream'])) {
+            $stream = $data['stream'];
+            # Known for local and most remote adapters; omitted (chunked) when the stream cannot say.
+            $stat = @fstat($stream);
+            $length = is_array($stat) && !empty($stat['size']) ? (int) $stat['size'] : null;
+            if ($request->httpMethod() === 'HEAD') {
+                fclose($stream);
+                $response = HTTPResponse::create('', 200);
+                if ($length) {
+                    $response->addHeader('Content-Length', (string) $length);
+                }
+            } else {
+                $response = HTTPStreamResponse::create($stream, $length, 200);
+            }
+        } else {
+            $body = (string) $data['body'];
+            $response = HTTPResponse::create($request->httpMethod() === 'HEAD' ? '' : $body, 200);
+            $response->addHeader('Content-Length', (string) strlen($body));
+        }
         $response->addHeader('Content-Type', $data['type']);
-        $response->addHeader('Content-Length', (string) strlen($data['body']));
         $response->addHeader('ETag', $etag);
         $response->addHeader('Cache-Control', $cacheControl);
         $response->addHeader('X-Content-Type-Options', 'nosniff');
-        if ($data['type'] === 'image/svg+xml') {
-            # An SVG opened directly is a document that could run script; an icon never needs to.
-            # sandbox additionally gives it an opaque origin, so even a CSP bypass reaches no cookies.
-            $response->addHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
-        }
         return $response;
     }
 

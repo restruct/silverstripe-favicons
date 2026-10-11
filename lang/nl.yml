@@ -1,11 +1,14 @@
 nl:
   Restruct\Favicons\FaviconService:
-    STATUS_NONE: 'Geen favicon-bron ingesteld; er wordt niets geserveerd.'
+    ERROR_NOT_PNG: 'Het bestand is geen PNG-afbeelding.'
+    ERROR_NOT_SQUARE: 'De afbeelding is {w}x{h} px; die moet vierkant zijn.'
+    ERROR_TOO_SMALL: 'De afbeelding is {w}x{h} px; die moet minstens {min}x{min} px zijn.'
+    ERROR_TOO_LARGE: 'De afbeelding is {w}x{h} px; die mag hoogstens {max}x{max} px zijn.'
+    STATUS_SKIPPED: '{origin} overgeslagen: {error}'
+    STATUS_NONE: 'Geen bruikbare favicon-bron; er wordt niets geserveerd.'
+    STATUS_FAILED: 'De afbeeldingsverwerking kon {origin} niet lezen; er worden geen iconen geserveerd. Controleer of het een intacte PNG is.'
+    STATUS_PENDING: 'De iconen uit {origin} worden gemaakt bij de volgende dev/build of icoon-aanvraag.'
     STATUS_OK: 'Alle favicon-varianten worden geserveerd vanuit {origin}.'
-    STATUS_SMALL: 'De bron is {w}x{h} px; gebruik minstens 512x512 px voor scherpe touch-iconen.'
-    STATUS_NO_RASTERISER: 'Alleen icon.svg wordt geserveerd vanuit {origin}: deze server kan SVG niet naar PNG omzetten (installeer de Imagick-extensie met SVG-ondersteuning, of rsvg-convert), dus favicon.ico en de touch-iconen ontbreken. Upload een PNG of stel een PNG-bron in om ze te serveren.'
-    STATUS_NO_GD: 'GD en Imagick ontbreken allebei, dus er kunnen geen PNG-varianten worden gemaakt.'
   Restruct\Favicons\Extensions\SiteConfigFaviconExtension:
     FaviconSource: 'Site-icoon (favicon)'
-    UPLOAD_HINT_SVG: 'SVG of PNG (vierkant, minstens 512x512 px). Gaat voor op het icoon uit de siteconfiguratie.'
-    UPLOAD_HINT_PNG: 'PNG (vierkant, minstens 512x512 px, transparante achtergrond). Gaat voor op het icoon uit de siteconfiguratie.'
+    UPLOAD_HINT: 'PNG, vierkant, minstens {min}x{min} px, bij voorkeur met transparante achtergrond. Gaat voor op het icoon uit de siteconfiguratie.'

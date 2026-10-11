@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace Restruct\Favicons\Extensions;
 
+use Psr\Log\LoggerInterface;
 use Restruct\Favicons\FaviconService;
 use SilverStripe\Admin\LeftAndMain;
 use SilverStripe\CMS\Controllers\ContentController;
 use SilverStripe\Core\Extension;
+use SilverStripe\Core\Injector\Injector;
 use SilverStripe\Security\Security;
 use SilverStripe\View\Requirements;
+use Throwable;
 
 /**
  * Adds the icon <link> tags to every page a controller renders, without template changes.
@@ -27,15 +30,25 @@ class FaviconHeadTagsExtension extends Extension
 {
     protected function onAfterInit(): void
     {
-        $service = FaviconService::singleton();
-        if (!$service->tagsEnabledFor($this->getContext())) {
-            return;
-        }
-        $tags = $service->getHeadTags();
-        if ($tags !== '') {
-            # The fixed ID makes a second insertion in the same request (Security rendering through
-            # a Page controller) overwrite rather than duplicate.
-            Requirements::insertHeadTags($tags, FaviconService::HEAD_TAGS_ID);
+        # An icon must never break a page: FaviconService::getHeadTags() only reads, and catches its
+        # own errors; this catch also covers the context check and the insertion.
+        try {
+            $service = FaviconService::singleton();
+            if (!$service->tagsEnabledFor($this->getContext())) {
+                return;
+            }
+            $tags = $service->getHeadTags();
+            if ($tags !== '') {
+                # The fixed ID makes a second insertion in the same request (Security rendering
+                # through a Page controller) overwrite rather than duplicate.
+                Requirements::insertHeadTags($tags, FaviconService::HEAD_TAGS_ID);
+            }
+        } catch (Throwable $e) {
+            # Logged by the service where it can be; a broken logger must not break the page either.
+            try {
+                Injector::inst()->get(LoggerInterface::class)->warning('Favicon tags left out: ' . $e->getMessage());
+            } catch (Throwable $ignored) {
+            }
         }
     }
 

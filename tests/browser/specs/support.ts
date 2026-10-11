@@ -8,13 +8,19 @@ import { test as base, expect } from '@playwright/test';
  * error or throws an uncaught exception. "Failed to load resource" (any 4xx/5xx request) arrives as
  * a console error too, so a 404 for an icon the page links is caught here as well.
  */
-export const test = base.extend<{ consoleGuard: void }>({
+export const test = base.extend<{ consoleGuard: void; allowedConsoleErrors: RegExp[] }>({
+    // A spec that provokes an error on purpose (an upload the server refuses) names exactly that
+    // error with test.use({ allowedConsoleErrors: [...] }); everything else still fails the spec.
+    allowedConsoleErrors: [[], { option: true }],
     consoleGuard: [
-        async ({ page }, use, testInfo) => {
+        async ({ page, allowedConsoleErrors }, use, testInfo) => {
             const errors: string[] = [];
             page.on('console', (msg) => {
                 if (msg.type() === 'error') {
-                    errors.push(`console.error: ${msg.text()} (${msg.location().url})`);
+                    const line = `console.error: ${msg.text()} (${msg.location().url})`;
+                    if (!allowedConsoleErrors.some((re) => re.test(line))) {
+                        errors.push(line);
+                    }
                 }
             });
             page.on('pageerror', (err) => errors.push(`uncaught: ${err.message}`));

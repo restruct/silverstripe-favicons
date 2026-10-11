@@ -1,11 +1,14 @@
 en:
   Restruct\Favicons\FaviconService:
-    STATUS_NONE: 'No favicon source configured; nothing is served.'
+    ERROR_NOT_PNG: 'The file is not a PNG image.'
+    ERROR_NOT_SQUARE: 'The image is {w}x{h} px; it must be square.'
+    ERROR_TOO_SMALL: 'The image is {w}x{h} px; it must be at least {min}x{min} px.'
+    ERROR_TOO_LARGE: 'The image is {w}x{h} px; it must be at most {max}x{max} px.'
+    STATUS_SKIPPED: 'Skipped {origin}: {error}'
+    STATUS_NONE: 'No usable favicon source; nothing is served.'
+    STATUS_FAILED: 'The image backend could not read {origin}; no icons are served. Check that it is an intact PNG.'
+    STATUS_PENDING: 'The icons from {origin} are generated on the next dev/build or icon request.'
     STATUS_OK: 'Serving all favicon variants from {origin}.'
-    STATUS_SMALL: 'The source is {w}x{h} px; use at least 512x512 px for sharp touch icons.'
-    STATUS_NO_RASTERISER: 'Only icon.svg is served from {origin}: this server cannot convert SVG to PNG (install the Imagick extension with SVG support, or rsvg-convert), so favicon.ico and the touch icons are missing. Upload a PNG or configure a PNG source to serve them.'
-    STATUS_NO_GD: 'Neither GD nor Imagick is available, so no PNG variants can be generated.'
   Restruct\Favicons\Extensions\SiteConfigFaviconExtension:
     FaviconSource: 'Site icon (favicon)'
-    UPLOAD_HINT_SVG: 'SVG or PNG (square, at least 512x512 px). Overrides the icon set in the site configuration.'
-    UPLOAD_HINT_PNG: 'PNG (square, at least 512x512 px, transparent background). Overrides the icon set in the site configuration.'
+    UPLOAD_HINT: 'PNG, square, at least {min}x{min} px, preferably with a transparent background. Overrides the icon set in the site configuration.'

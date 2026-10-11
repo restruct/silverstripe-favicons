@@ -35,7 +35,7 @@ jobs:
             php: '8.4'
             recipe: '^6'
             testing: '^4'
-          # PHP 8.5 deprecations (eg imagedestroy) print into responses in dev, so it gets its own leg.
+          # PHP 8.5 deprecations print into responses in dev, so it gets its own leg.
           - silverstripe: '6'
             php: '8.5'
             recipe: '^6'
@@ -74,9 +74,9 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          # gd resizes the icons; imagick is added so the Imagick SVG rasteriser runs here too
-          # (the tests that need a rasteriser skip, rather than fail, where none is available).
-          extensions: mbstring, intl, pdo_mysql, mysqli, gd, imagick, zip, dom, xml, tokenizer, simplexml, ctype, hash, session
+          # gd: the framework's image backend (Intervention with its default GD driver) draws the
+          # icons. No imagick: the module makes no image-library calls of its own any more.
+          extensions: mbstring, intl, pdo_mysql, mysqli, gd, zip, dom, xml, tokenizer, simplexml, ctype, hash, session
           tools: composer:v2
           coverage: none
 

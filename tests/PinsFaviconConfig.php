@@ -2,8 +2,11 @@
 
 namespace Restruct\Favicons\Tests;
 
+use Psr\SimpleCache\CacheInterface;
 use Restruct\Favicons\FaviconService;
-use Restruct\Favicons\Generator\SvgRasteriser;
+use SilverStripe\Core\Injector\Injector;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use Symfony\Component\Cache\Psr16Cache;
 use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Config;
 
@@ -44,24 +47,24 @@ trait PinsFaviconConfig
             'max_age' => 86400,
             'versioned_max_age' => 31536000,
             'failure_ttl' => 600,
-            # Pretend svg-images is absent unless a test says otherwise, whatever the host installed
-            'svg_images_class' => 'Restruct\\Favicons\\Tests\\NoSuchClass',
+            'use_admintweaks' => true,
+            'max_source_size' => 2048,
+            'busy_ttl' => 120,
+            'asset_folder' => '_favicons',
         ];
         foreach ($defaults as $key => $value) {
             # remove() first: set() on an array merges with what the host configured
             Config::modify()->remove(FaviconService::class, $key);
             Config::modify()->set(FaviconService::class, $key, $value);
         }
-        Config::modify()->remove(SvgRasteriser::class, 'rasterisers');
-        Config::modify()->set(SvgRasteriser::class, 'rasterisers', ['rsvg-convert', 'imagick']);
-        Config::modify()->set(SvgRasteriser::class, 'rsvg_convert_path', 'rsvg-convert');
-        Config::modify()->set(SvgRasteriser::class, 'rsvg_timeout', 5);
         # Expected URLs are written as /favicon.ico etc.; a host with SS_BASE_URL in a subdirectory
         # (or a different host name) must not change them.
         Config::modify()->set(Director::class, 'alternate_base_url', '/');
 
-        # The variant cache is a real filesystem cache that outlives a test: a failure marker or a
-        # generated variant from one test must not decide the next one.
-        FaviconService::singleton()->getCache()->clear();
+        # An in-memory pool per test instead of the site's TEMP_PATH pool: a failure marker or the
+        # registry of generated sets from one test must not decide the next one, and the tests
+        # must not touch (or clear) the registry of the site they run in. The Injector is nested
+        # per test, so the real service comes back afterwards.
+        Injector::inst()->registerService(new Psr16Cache(new ArrayAdapter()), CacheInterface::class . '.RestructFavicons');
     }
 }
