@@ -1,6 +1,6 @@
 {
     "name": "restruct/silverstripe-favicons",
-    "description": "One project icon to every favicon, touch icon and web manifest variant browsers ask for, served at the paths they probe, on the frontend, in the CMS and on the login pages",
+    "description": "One square PNG to every favicon, touch icon and web manifest variant browsers ask for, served at the paths they probe, on the frontend, in the CMS and on the login pages",
     "type": "silverstripe-vendormodule",
     "keywords": [
         "silverstripe",
@@ -27,15 +27,10 @@
     "require-dev": {
         "silverstripe/recipe-testing": "^3 || ^4"
     },
-    "conflict": {
-        "restruct/silverstripe-svg-images": "<3.0"
-    },
     "suggest": {
-        "ext-gd": "Resizes PNG sources and rasterised SVGs into the PNG and ICO variants (ext-imagick works too)",
-        "ext-imagick": "Rasterises an SVG source into the PNG and ICO variants, when ImageMagick has an SVG delegate",
         "silverstripe/cms": "Adds the icon tags to frontend pages (ContentController)",
         "silverstripe/asset-admin": "Provides the upload field for allow_upload: true",
-        "restruct/silverstripe-svg-images": "3.x: lets the CMS upload field accept (sanitised) SVG as well as PNG"
+        "restruct/silverstripe-admintweaks": "Its SiteConfig.FavIcon and ThemeBrowserColor are used as fallbacks when set"
     },
     "autoload": {
         "psr-4": {

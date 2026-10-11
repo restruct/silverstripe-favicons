@@ -6,6 +6,7 @@ use Restruct\Favicons\Extensions\FaviconHeadTagsExtension;
 use Restruct\Favicons\FaviconService;
 use Restruct\Favicons\Tests\Stub\FavTestController;
 use SilverStripe\Admin\LeftAndMain;
+use SilverStripe\Assets\Dev\TestAssetStore;
 use SilverStripe\CMS\Controllers\ContentController;
 use SilverStripe\CMS\Model\SiteTree;
 use SilverStripe\Control\Director;
@@ -25,6 +26,8 @@ class HeadTagsTest extends FunctionalTest
     protected function setUp(): void
     {
         parent::setUp();
+        # Rendering the tags generates the icon set into the AssetStore
+        TestAssetStore::activate('HeadTagsTest');
         $this->pinFaviconConfig();
         # Prepended: a merge would append the rule after the CMS catch-all ($URLSegment//$Action),
         # which would claim the URL first and 404 it as a missing page.
@@ -33,6 +36,12 @@ class HeadTagsTest extends FunctionalTest
             'rules',
             ['favtest//$Action' => FavTestController::class] + (array) Director::config()->get('rules')
         );
+    }
+
+    protected function tearDown(): void
+    {
+        TestAssetStore::reset();
+        parent::tearDown();
     }
 
     private function assertHasIconTags(string $html, string $where): void

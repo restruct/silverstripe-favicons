@@ -7,26 +7,36 @@ namespace Restruct\Favicons;
 use InvalidArgumentException;
 use Psr\Log\LoggerInterface;
 use Psr\SimpleCache\CacheInterface;
-use Restruct\Favicons\Generator\ImageProcessor;
+use Restruct\Favicons\Generator\IconRenderer;
 use Restruct\Favicons\Generator\IcoWriter;
-use Restruct\Favicons\Generator\SvgRasteriser;
-use Restruct\Favicons\Generator\SvgSanitiser;
 use SilverStripe\Assets\File;
+use SilverStripe\Assets\Storage\AssetStore;
+use SilverStripe\Assets\Storage\DBFile;
 use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Configurable;
 use SilverStripe\Core\Injector\Injectable;
 use SilverStripe\Core\Injector\Injector;
 use SilverStripe\Core\Manifest\ModuleResourceLoader;
+use SilverStripe\ORM\DataObject;
 use SilverStripe\SiteConfig\SiteConfig;
 use SilverStripe\Versioned\Versioned;
 use Throwable;
 
 /**
- * Resolves the project icon, knows which variants exist and at which paths, generates and caches
- * them, and builds the head tags.
+ * Resolves the project icon, knows which variants exist and at which paths, generates them into the
+ * AssetStore, and builds the head tags.
  *
- * Source precedence: a published CMS upload on SiteConfig (only with allow_upload: true), then the
- * YAML `source`. Everything else is derived from that one file.
+ * Source precedence, first usable one wins:
+ *   1. the CMS upload on Settings (SiteConfig.FaviconSource), only with allow_upload: true
+ *   2. admintweaks' SiteConfig.FavIcon, when that module is installed and use_admintweaks is on
+ *   3. the YAML `source`
+ * Every source must be a square PNG of at least MIN_SOURCE_SIZE px.
+ *
+ * Generated files live in the AssetStore (so S3 and other adapters work), under
+ * `_favicons/<set id>/`: a public copy of the source as icon.png, its PNG variants as asset variants
+ * of that file, and favicon.ico next to it. None of them gets a File record. The set id is a hash of
+ * the source content and the generation config, so a new icon or new config is a new folder, and the
+ * previous set is deleted once the new one is complete.
  */
 class FaviconService
 {
@@ -35,9 +45,9 @@ class FaviconService
 
     /**
      * Bumped whenever the generated output changes for the same input, so browsers and caches that
-     * hold a long-lived copy pick up the new rendering.
+     * hold a long-lived copy pick up the new rendering, and a new set is generated.
      */
-    public const GENERATOR_VERSION = '1';
+    public const GENERATOR_VERSION = '2';
 
     /**
      * Uniqueness key for Requirements::insertHeadTags(), so the tags are inserted once even when two
@@ -46,16 +56,25 @@ class FaviconService
     public const HEAD_TAGS_ID = 'restruct-favicons';
 
     /**
-     * The icon as a resource string, resolved through ModuleResourceLoader: "vendor/module:path/icon.svg",
+     * Smallest accepted source edge: the largest variant (icon-512.png, the maskable icon) is drawn at
+     * 512 px, and an upscaled icon looks blurry on every high-density screen.
+     */
+    public const MIN_SOURCE_SIZE = 512;
+
+    /**
+     * The icon as a resource string, resolved through ModuleResourceLoader: "vendor/module:path/icon.png",
      * or a path relative to the project root such as "app/images/icon.png" or
-     * "themes/mytheme/images/icon.svg". SVG or PNG.
+     * "themes/mytheme/images/icon.png". A square PNG of at least 512x512 px.
+     *
+     * This is one fixed file, not looked up through the theme stack: when the site switches theme,
+     * point `source` at the new theme's icon.
      *
      * @config
      */
     private static ?string $source = null;
 
     /**
-     * Show an upload field on Settings (SiteConfig). A published upload overrules `source`.
+     * Show an upload field on Settings (SiteConfig). A published upload overrules every other source.
      *
      * @config
      */
@@ -69,13 +88,21 @@ class FaviconService
     private static string $upload_folder = 'favicon';
 
     /**
-     * The class whose presence means restruct/silverstripe-svg-images is installed, which is what
-     * makes SVG an allowed, sanitised Image upload. Config rather than a constant so a project with a
-     * different SVG module can point it elsewhere (and so the tests can simulate either case).
+     * Use restruct/silverstripe-admintweaks' SiteConfig.FavIcon as a source (after the upload, before
+     * the YAML source) and its SiteConfig.ThemeBrowserColor as theme colour (when theme_color is not
+     * set), when that module is installed and the fields are filled in.
      *
      * @config
      */
-    private static string $svg_images_class = 'Restruct\\Silverstripe\\SVG\\SVGImage';
+    private static bool $use_admintweaks = true;
+
+    /**
+     * Largest accepted source edge. Decoding a bitmap costs width x height x 4 bytes of memory, so a
+     * mistaken 20000 px upload would otherwise exhaust memory_limit on every generation attempt.
+     *
+     * @config
+     */
+    private static int $max_source_size = 4096;
 
     /**
      * Fill colour for the opaque variants (apple-touch-icon*, maskable). iOS paints transparency
@@ -124,7 +151,7 @@ class FaviconService
 
     /**
      * Web manifest members. Empty name/short_name fall back to the SiteConfig title; empty
-     * background_color falls back to `background_color`, empty theme_color to `theme_color`.
+     * background_color falls back to `background_color`, empty theme_color to the theme colour.
      *
      * @config
      */
@@ -141,7 +168,8 @@ class FaviconService
     ];
 
     /**
-     * Emitted as <meta name="theme-color"> and used in the manifest. Null emits nothing.
+     * Emitted as <meta name="theme-color"> and used in the manifest. Null falls back to admintweaks'
+     * ThemeBrowserColor (see use_admintweaks), and otherwise emits nothing.
      *
      * @config
      */
@@ -186,18 +214,24 @@ class FaviconService
     private static int $versioned_max_age = 31536000;
 
     /**
-     * Edge length of the PNG that an SVG source is rasterised to once, and all PNG variants are
-     * scaled down from.
-     */
-    protected const MASTER_SIZE = 512;
-
-    /**
-     * Seconds a failed generation (unreadable file, renderer error or timeout) is remembered, during
-     * which the bitmap variants are neither linked nor retried.
+     * Seconds a failed generation (a PNG the image backend cannot decode) is remembered, during which
+     * the icon variants are neither linked nor retried.
      *
      * @config
      */
     private static int $failure_ttl = 600;
+
+    /**
+     * AssetStore folder the generated sets are written to.
+     *
+     * @config
+     */
+    private static string $asset_folder = '_favicons';
+
+    /**
+     * Cache key of the registry of generated sets: set id => [src hash, ico hash, done].
+     */
+    protected const SETS_KEY = 'sets';
 
     /**
      * Logged-once guard per process; the cache keeps it once per source across requests.
@@ -211,30 +245,41 @@ class FaviconService
     # ---------------------------------------------------------------------------------------------
 
     /**
-     * The icon to generate from, or null when none is configured or usable.
+     * The icon to generate from: the first usable candidate, or null.
      */
     public function getSource(): ?IconSource
     {
-        return $this->getUploadSource() ?? $this->getConfigSource();
+        foreach ($this->getSourceCandidates() as $candidate) {
+            if ($candidate->isUsable()) {
+                return $candidate;
+            }
+        }
+        return null;
     }
 
     /**
-     * Extensions the upload field accepts. SVG only when restruct/silverstripe-svg-images is installed:
-     * without it core does not allow .svg uploads at all, nor sanitise them.
+     * Every source that is set, in order of precedence, usable or not.
      *
-     * PNG only for bitmaps: an icon needs transparency, JPEG has none, and WebP/GIF sources would only
-     * be converted to PNG anyway while adding decoder differences between GD builds.
+     * @return IconSource[]
+     */
+    public function getSourceCandidates(): array
+    {
+        return array_values(array_filter([
+            $this->getUploadSource(),
+            $this->getAdmintweaksSource(),
+            $this->getConfigSource(),
+        ]));
+    }
+
+    /**
+     * Extensions the upload field accepts. PNG only: an icon needs transparency (so no JPEG), and
+     * one bitmap format keeps the generated output identical whichever image backend renders it.
      *
      * @return string[]
      */
     public static function allowedUploadExtensions(): array
     {
-        $exts = ['png'];
-        $svgClass = (string) static::config()->get('svg_images_class');
-        if ($svgClass !== '' && class_exists($svgClass)) {
-            $exts[] = 'svg';
-        }
-        return $exts;
+        return ['png'];
     }
 
     public function getUploadSource(): ?IconSource
@@ -242,7 +287,32 @@ class FaviconService
         if (!$this->config()->get('allow_upload') || !class_exists(SiteConfig::class)) {
             return null;
         }
-        $id = (int) SiteConfig::current_site_config()->FaviconSourceID;
+        return $this->getFileSource((int) SiteConfig::current_site_config()->FaviconSourceID, 'upload');
+    }
+
+    /**
+     * admintweaks' SiteConfig.FavIcon (a File, any image type). Only a PNG that passes the same
+     * checks as every other source is used; anything else is reported and skipped.
+     */
+    public function getAdmintweaksSource(): ?IconSource
+    {
+        if (!$this->config()->get('use_admintweaks') || !$this->hasAdmintweaksIcon()) {
+            return null;
+        }
+        return $this->getFileSource((int) SiteConfig::current_site_config()->FavIconID, 'admintweaks');
+    }
+
+    /**
+     * Whether SiteConfig has admintweaks' FavIcon relation (installed and its extension applied).
+     */
+    public function hasAdmintweaksIcon(): bool
+    {
+        return class_exists(SiteConfig::class)
+            && DataObject::getSchema()->hasOneComponent(SiteConfig::class, 'FavIcon') !== null;
+    }
+
+    protected function getFileSource(int $id, string $label): ?IconSource
+    {
         if (!$id) {
             return null;
         }
@@ -250,21 +320,36 @@ class FaviconService
         if (!$file || !$file->exists()) {
             return null;
         }
-        $ext = strtolower((string) $file->getExtension());
-        if (!in_array($ext, self::allowedUploadExtensions(), true)) {
-            return null;
+        $hash = (string) $file->getHash();
+        $origin = $label . ':' . $file->getFilename();
+        # Validation needs only the PNG header, and is remembered per content hash, so a page request
+        # costs one cache read instead of a read from the asset store.
+        $key = 'chk_' . md5($hash);
+        $error = $this->getCache()->get($key);
+        if (!is_string($error)) {
+            $error = (string) $this->checkPng($this->readHead($file));
+            $this->getCache()->set($key, $error);
         }
-        return new IconSource(
-            $ext,
-            (string) $file->getHash(),
-            'upload:' . $file->getFilename(),
-            fn() => (string) $file->getString()
-        );
+        return new IconSource($hash, $origin, fn() => (string) $file->getString(), $error === '' ? null : $error);
     }
 
     /**
-     * The upload as published. Icons are fetched by anonymous visitors, so a draft-only file must
-     * never be used: it would leak an unpublished file, or break once the draft is discarded.
+     * The first bytes of a stored file: enough for the PNG signature and header.
+     */
+    protected function readHead(File $file): string
+    {
+        $stream = $file->getStream();
+        if (!is_resource($stream)) {
+            return '';
+        }
+        $head = (string) fread($stream, 64);
+        fclose($stream);
+        return $head;
+    }
+
+    /**
+     * A file as published. Icons are fetched by anonymous visitors, so a draft-only file must never
+     * be used: it would leak an unpublished file, or break once the draft is discarded.
      */
     protected function getLiveFile(int $id): ?File
     {
@@ -287,17 +372,17 @@ class FaviconService
             $this->warnOnce('missing:' . $resource, "Favicon source '{$resource}' could not be found");
             return null;
         }
-        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-        if (!in_array($ext, [IconSource::TYPE_SVG, IconSource::TYPE_PNG], true)) {
-            $this->warnOnce('type:' . $resource, "Favicon source '{$resource}' must be an .svg or .png file");
-            return null;
+        $info = $this->inspectFile($path);
+        $origin = 'file:' . $resource;
+        if ($info['error'] !== '') {
+            $this->warnOnce('content:' . $info['hash'], "Favicon source '{$resource}' is unusable: " . $info['error']);
         }
-        $info = $this->inspectFile($path, $ext);
-        if (!$info['valid']) {
-            $this->warnOnce('content:' . $info['hash'], "Favicon source '{$resource}' is not a valid .{$ext} file");
-            return null;
-        }
-        return new IconSource($ext, $info['hash'], 'file:' . $resource, fn() => (string) file_get_contents($path));
+        return new IconSource(
+            $info['hash'],
+            $origin,
+            fn() => (string) file_get_contents($path),
+            $info['error'] === '' ? null : $info['error']
+        );
     }
 
     /**
@@ -332,51 +417,129 @@ class FaviconService
     }
 
     /**
-     * Content hash of a file plus a content sniff (is it really a PNG/SVG), cached on
-     * path + mtime + size so a page request does not re-read the file. Keyed on content rather than
-     * mtime so a deploy that rewrites the file unchanged does not bust every visitor's cached icon.
+     * Content hash of a file plus the PNG check, cached on path + mtime + size so a page request
+     * does not re-read the file. Keyed on content rather than mtime so a deploy that rewrites the
+     * file unchanged does not bust every visitor's cached icon.
      *
-     * @return array{hash:string, valid:bool}
+     * @return array{hash:string, error:string} error is '' for a usable file
      */
-    protected function inspectFile(string $path, string $type): array
+    protected function inspectFile(string $path): array
     {
         $stat = @stat($path) ?: ['mtime' => 0, 'size' => 0];
         $key = 'file_' . md5($path . '|' . $stat['mtime'] . '|' . $stat['size']);
         $cache = $this->getCache();
         $info = $cache->get($key);
-        if (!is_array($info) || !isset($info['hash'], $info['valid'])) {
-            $head = (string) @file_get_contents($path, false, null, 0, 4096);
-            $info = ['hash' => (string) sha1_file($path), 'valid' => IconSource::looksLike($type, $head)];
+        if (!is_array($info) || !isset($info['hash'], $info['error'])) {
+            $head = (string) @file_get_contents($path, false, null, 0, 64);
+            $info = ['hash' => (string) sha1_file($path), 'error' => (string) $this->checkPng($head)];
             $cache->set($key, $info);
         }
         return $info;
     }
 
-    # ---------------------------------------------------------------------------------------------
-    # Capabilities and versioning
-    # ---------------------------------------------------------------------------------------------
-
     /**
-     * Whether PNG/ICO variants can be produced from this source: a PNG needs GD or Imagick, an SVG
-     * additionally needs a rasteriser.
+     * Why these bytes are not a usable icon source, or null when they are: a PNG, square, at least
+     * MIN_SOURCE_SIZE and at most max_source_size px. Reads only the header, so the first 24 bytes
+     * are enough.
+     *
+     * Non-square sources are refused rather than padded: padding would put the icon off-centre in
+     * some variants and invent a background colour for the margin, and the person uploading it is
+     * better placed to decide how it should be cropped.
      */
-    public function canRasterise(?IconSource $source = null): bool
+    public function checkPng(string $bytes): ?string
     {
-        $source ??= $this->getSource();
-        if (!$source || !ImageProcessor::isAvailable()) {
-            return false;
+        $dims = self::pngDimensions($bytes);
+        if ($dims === null) {
+            return _t(__CLASS__ . '.ERROR_NOT_PNG', 'The file is not a PNG image.');
         }
-        if ($this->hasFailed($source)) {
-            # A recent attempt failed (bad file, renderer timeout): do not advertise or retry the
-            # bitmap variants until the marker expires, so a broken source costs one attempt per
-            # failure_ttl instead of one per request.
-            return false;
+        [$w, $h] = $dims;
+        if ($w !== $h) {
+            return _t(
+                __CLASS__ . '.ERROR_NOT_SQUARE',
+                'The image is {w}x{h} px; it must be square.',
+                ['w' => $w, 'h' => $h]
+            );
         }
-        return !$source->isSvg() || SvgRasteriser::singleton()->getAvailable() !== null;
+        if ($w < self::MIN_SOURCE_SIZE) {
+            return _t(
+                __CLASS__ . '.ERROR_TOO_SMALL',
+                'The image is {w}x{h} px; it must be at least {min}x{min} px.',
+                ['w' => $w, 'h' => $h, 'min' => self::MIN_SOURCE_SIZE]
+            );
+        }
+        $max = (int) $this->config()->get('max_source_size');
+        if ($max > 0 && $w > $max) {
+            return _t(
+                __CLASS__ . '.ERROR_TOO_LARGE',
+                'The image is {w}x{h} px; it must be at most {max}x{max} px.',
+                ['w' => $w, 'h' => $h, 'max' => $max]
+            );
+        }
+        return null;
     }
 
     /**
-     * Whether generating bitmaps from this source failed within the last failure_ttl seconds.
+     * Width and height from a PNG's IHDR chunk, or null when the bytes do not start like a PNG.
+     * Parsed by hand from the fixed header layout (signature, IHDR length and type, then width and
+     * height as big-endian uint32) so no image library is involved in deciding what is accepted.
+     *
+     * @return array{0:int, 1:int}|null
+     */
+    public static function pngDimensions(string $bytes): ?array
+    {
+        if (strlen($bytes) < 24 || !str_starts_with($bytes, "\x89PNG\r\n\x1a\n") || substr($bytes, 12, 4) !== 'IHDR') {
+            return null;
+        }
+        $dims = unpack('Nw/Nh', substr($bytes, 16, 8));
+        if (!$dims || $dims['w'] < 1 || $dims['h'] < 1) {
+            return null;
+        }
+        return [(int) $dims['w'], (int) $dims['h']];
+    }
+
+    # ---------------------------------------------------------------------------------------------
+    # Versioning
+    # ---------------------------------------------------------------------------------------------
+
+    /**
+     * Id of the generated set: everything that changes the generated files. Also the AssetStore
+     * folder name, so a new icon or new config never reuses (or overwrites) an older set's files.
+     */
+    public function getSetId(IconSource $source): string
+    {
+        $cfg = $this->config();
+        return substr(sha1((string) json_encode([
+            self::GENERATOR_VERSION,
+            $source->getHash(),
+            $cfg->get('background_color'),
+            $cfg->get('touch_icon_padding'),
+            $cfg->get('maskable_padding'),
+            $cfg->get('ico_sizes'),
+            $this->getTouchSizes(),
+        ])), 0, 16);
+    }
+
+    /**
+     * Short hash of everything that affects what is served: the set plus (for the manifest) its
+     * fields and the site title. Used as the ?v= cache-buster in the head tags and in the ETag.
+     */
+    public function getVersion(?IconSource $source = null): ?string
+    {
+        $source ??= $this->getSource();
+        if (!$source) {
+            return null;
+        }
+        $parts = [
+            $this->getSetId($source),
+            $this->config()->get('manifest') ? $this->getManifestData($source) : null,
+            # Whether the images can be served changes the manifest's icon list and the responses.
+            $this->hasFailed($source),
+        ];
+        return substr(sha1((string) json_encode($parts)), 0, 16);
+    }
+
+    /**
+     * Whether generating this source's set failed within the last failure_ttl seconds.
      */
     public function hasFailed(IconSource $source): bool
     {
@@ -390,35 +553,7 @@ class FaviconService
 
     protected function failureKey(IconSource $source): string
     {
-        return 'fail_' . self::GENERATOR_VERSION . '_' . $source->getHash();
-    }
-
-    /**
-     * Short hash of everything that affects the generated output: source content, the module's
-     * generator version, the relevant config and (for the manifest) the site title. Used as the
-     * ?v= cache-buster in the head tags, in the ETag, and as the cache key prefix.
-     */
-    public function getVersion(?IconSource $source = null): ?string
-    {
-        $source ??= $this->getSource();
-        if (!$source) {
-            return null;
-        }
-        $cfg = $this->config();
-        $parts = [
-            self::GENERATOR_VERSION,
-            $source->getType(),
-            $source->getHash(),
-            $cfg->get('background_color'),
-            $cfg->get('touch_icon_padding'),
-            $cfg->get('maskable_padding'),
-            $cfg->get('ico_sizes'),
-            $cfg->get('touch_sizes'),
-            $cfg->get('manifest') ? $this->getManifestData($source) : null,
-            # Whether PNGs can be made changes what is served (and the manifest's icon list).
-            $this->canRasterise($source),
-        ];
-        return substr(sha1(json_encode($parts)), 0, 16);
+        return 'fail_' . $this->getSetId($source);
     }
 
     # ---------------------------------------------------------------------------------------------
@@ -438,7 +573,7 @@ class FaviconService
         }
         $cfg = $this->config();
         $variants = [];
-        if ($this->canRasterise($source)) {
+        if (!$this->hasFailed($source)) {
             $bg = (string) $cfg->get('background_color');
             $touchPad = (float) $cfg->get('touch_icon_padding');
             $variants['favicon.ico'] = ['format' => 'ico', 'type' => 'image/x-icon'];
@@ -451,9 +586,6 @@ class FaviconService
             $variants['icon-maskable-512.png'] = [
                 'format' => 'png', 'size' => 512, 'bg' => $bg, 'pad' => (float) $cfg->get('maskable_padding'),
             ];
-        }
-        if ($source->isSvg()) {
-            $variants['icon.svg'] = ['format' => 'svg', 'type' => 'image/svg+xml'];
         }
         if ($cfg->get('manifest')) {
             $variants['site.webmanifest'] = ['format' => 'manifest', 'type' => 'application/manifest+json'];
@@ -474,6 +606,17 @@ class FaviconService
         $sizes = array_map('intval', (array) $this->config()->get('touch_sizes'));
         $sizes[] = 180;
         $sizes = array_values(array_unique(array_filter($sizes, fn($n) => $n >= 16 && $n <= 1024)));
+        sort($sizes);
+        return $sizes;
+    }
+
+    /**
+     * @return int[] ICO entry sizes within what the format can hold
+     */
+    public function getIcoSizes(): array
+    {
+        $sizes = array_map('intval', (array) $this->config()->get('ico_sizes'));
+        $sizes = array_values(array_unique(array_filter($sizes, fn($n) => $n >= 1 && $n <= 256)));
         sort($sizes);
         return $sizes;
     }
@@ -511,7 +654,6 @@ class FaviconService
     {
         switch ($lower) {
             case 'favicon.ico':
-            case 'icon.svg':
             case 'icon-192.png':
             case 'icon-512.png':
             case 'icon-maskable-512.png':
@@ -552,16 +694,16 @@ class FaviconService
     }
 
     # ---------------------------------------------------------------------------------------------
-    # Generation
+    # Generation and storage
     # ---------------------------------------------------------------------------------------------
 
     /**
-     * Body and content type for a variant, generated once per source version and cached.
-     * Null when the variant does not exist for this source or could not be generated.
+     * Content type plus either a stream from the AssetStore or (for the manifest) a body, for one
+     * variant of the current source. Null when it does not exist or could not be generated.
      *
-     * @return array{body:string, type:string}|null
+     * @return array{type:string, stream?:resource, body?:string}|null
      */
-    public function getVariant(string $name): ?array
+    public function openVariant(string $name): ?array
     {
         $source = $this->getSource();
         if (!$source) {
@@ -569,118 +711,276 @@ class FaviconService
         }
         $variants = $this->getVariants($source);
         if (!isset($variants[$name])) {
-            if ($source->isSvg() && !$this->canRasterise($source)) {
-                $this->warnNoRasteriser($source);
-            }
             return null;
         }
         $spec = $variants[$name];
 
-        # The manifest is small and depends on SiteConfig, so it is built fresh rather than cached.
+        # The manifest is small and depends on SiteConfig, so it is built fresh rather than stored.
         if ($spec['format'] === 'manifest') {
-            return ['body' => $this->buildManifest($source), 'type' => $spec['type']];
+            return ['type' => $spec['type'], 'body' => $this->buildManifest($source)];
         }
 
-        $cache = $this->getCache();
-        $key = 'v_' . $this->getVersion($source) . '_' . md5($name);
-        $body = $cache->get($key);
-        if (!is_string($body) || $body === '') {
-            try {
-                $body = $this->generate($source, $spec);
-            } catch (Throwable $e) {
-                $this->markFailed($source);
-                $this->warnOnce('gen:' . $source->getHash() . $name, "Favicon variant {$name} failed: " . $e->getMessage());
+        # Second attempt only when the set was registered as complete but a file has gone missing
+        # from the store since (deleted by hand, or by another server's cleanup).
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $set = $this->ensureSet($source);
+            if ($set === null) {
                 return null;
             }
-            if ($body === null) {
-                return null;
+            [$filename, $hash, $variant] = $this->locate($set, $spec);
+            $stream = $hash ? $this->getStore()->getAsStream($filename, $hash, $variant) : null;
+            if (is_resource($stream)) {
+                return ['type' => $spec['type'], 'stream' => $stream];
             }
-            $cache->set($key, $body);
-        }
-        return ['body' => $body, 'type' => $spec['type']];
-    }
-
-    /**
-     * @param array<string, mixed> $spec
-     */
-    protected function generate(IconSource $source, array $spec): ?string
-    {
-        switch ($spec['format']) {
-            case 'svg':
-                return $source->getContents();
-            case 'png':
-                $master = $this->getMasterPng($source);
-                return $master === null
-                    ? null
-                    : ImageProcessor::singleton()->square($master, (int) $spec['size'], $spec['bg'], (float) $spec['pad']);
-            case 'ico':
-                $master = $this->getMasterPng($source);
-                if ($master === null) {
-                    return null;
-                }
-                $pngs = [];
-                foreach ((array) $this->config()->get('ico_sizes') as $size) {
-                    $size = (int) $size;
-                    if ($size >= 1 && $size <= 256) {
-                        # Transparent: browser tabs have their own background.
-                        $pngs[$size] = ImageProcessor::singleton()->square($master, $size);
-                    }
-                }
-                return $pngs ? IcoWriter::build($pngs) : null;
+            $this->forgetSet($set['id']);
         }
         return null;
     }
 
     /**
-     * The source as a PNG to scale every variant from: the PNG itself, or the SVG rasterised once at
-     * MASTER_SIZE. Cached per source hash so an SVG is rasterised once, not once per variant.
+     * Whether a variant can be served for the current source, generating the set when needed.
      */
-    protected function getMasterPng(IconSource $source): ?string
+    public function canServe(string $name): bool
     {
-        if (!$source->isSvg()) {
-            return $source->getContents();
+        $source = $this->getSource();
+        $variants = $source ? $this->getVariants($source) : [];
+        if (!isset($variants[$name])) {
+            return false;
         }
-        $cache = $this->getCache();
-        $key = 'master_' . self::GENERATOR_VERSION . '_' . $source->getHash();
-        $png = $cache->get($key);
-        if (is_string($png) && $png !== '') {
-            return $png;
-        }
+        return $variants[$name]['format'] === 'manifest' || $this->ensureSet($source) !== null;
+    }
+
+    /**
+     * The registry entry of the source's set, generating it into the AssetStore first if needed.
+     * Null when it cannot be generated (the failure is then remembered for failure_ttl).
+     *
+     * Once a set is complete, any other registered set (an older icon or config) is deleted from
+     * the store, so only one set is kept.
+     *
+     * @return array{id:string, src:string, ico:?string, done:bool}|null
+     */
+    public function ensureSet(IconSource $source): ?array
+    {
         if ($this->hasFailed($source)) {
             return null;
         }
-        # One render per source at a time: concurrent requests for a source that is being rendered
-        # get a fast 404 instead of each starting the same (possibly slow) render. The marker
-        # outlives the active rasteriser's expected run time (see SvgRasteriser::getBusyTtl()), so a
-        # crashed worker cannot block the source for long.
-        $busyKey = 'busy_' . self::GENERATOR_VERSION . '_' . $source->getHash();
-        if ($cache->get($busyKey)) {
-            return null;
+        $setId = $this->getSetId($source);
+        $sets = $this->getSets();
+        $entry = $sets[$setId] ?? null;
+        if (is_array($entry) && !empty($entry['done'])) {
+            return ['id' => $setId] + $entry;
         }
-        $cache->set($busyKey, 1, SvgRasteriser::singleton()->getBusyTtl());
+
         try {
-            # Rebuild the SVG from an allowlist before ANY rasteriser sees it: the result is published.
-            $svg = SvgSanitiser::forRasterising($source->getContents());
-            $png = $svg === null ? null : SvgRasteriser::singleton()->rasterise($svg, self::MASTER_SIZE);
-        } finally {
-            $cache->delete($busyKey);
+            $entry = $this->buildSet($source, $setId, is_array($entry) ? $entry : null);
+        } catch (Throwable $e) {
+            $this->warnOnce('gen:' . $setId, 'Favicon generation from ' . $source->getOrigin() . ' failed: ' . $e->getMessage());
+            $entry = null;
         }
-        if ($png === null) {
+        if ($entry === null) {
             $this->markFailed($source);
-            if ($svg === null) {
-                $this->warnOnce('unsafe:' . $source->getHash(), 'Favicon source ' . $source->getOrigin() . ' could not be parsed as a safe SVG; only icon.svg is served.');
-            } else {
-                $this->warnNoRasteriser($source);
-            }
+            $this->warnOnce('fail:' . $setId, 'Favicon source ' . $source->getOrigin() . ' could not be decoded by the image backend; no icon variants are served.');
             return null;
         }
-        $cache->set($key, $png);
-        return $png;
+
+        # Re-read: another request may have registered sets meanwhile.
+        foreach ($this->getSets() as $id => $old) {
+            if ($id !== $setId && is_array($old)) {
+                $this->deleteSet((string) $id, $old);
+            }
+        }
+        $this->getCache()->set(self::SETS_KEY, [$setId => $entry]);
+        return ['id' => $setId] + $entry;
+    }
+
+    /**
+     * Generate every file of a set: the public copy of the source, its PNG variants, favicon.ico.
+     *
+     * @param array<string, mixed>|null $previous An incomplete registry entry for this set
+     * @return array{src:string, ico:?string, done:bool}|null
+     */
+    protected function buildSet(IconSource $source, string $setId, ?array $previous): ?array
+    {
+        $store = $this->getStore();
+        $filename = $this->setPath($setId, 'icon.png');
+        $srcHash = (string) ($previous['src'] ?? $source->getHash());
+
+        # The source copy is a plain AssetStore file: no File record, so a YAML or theme source never
+        # appears in the CMS, and the folder is owned by this module alone.
+        if (!$store->exists($filename, $srcHash)) {
+            $result = $store->setFromString($source->getContents(), $filename, null, null, [
+                'visibility' => AssetStore::VISIBILITY_PUBLIC,
+                'conflict' => AssetStore::CONFLICT_OVERWRITE,
+            ]);
+            $srcHash = (string) ($result['Hash'] ?? '');
+            if ($srcHash === '') {
+                return null;
+            }
+        }
+        # Registered before the variants are drawn, so a set that fails half-way is still deleted
+        # by the next successful one.
+        $this->registerSet($setId, ['src' => $srcHash, 'ico' => null, 'done' => false]);
+        $original = $this->getOriginal($setId, $srcHash);
+
+        foreach ($this->getVariants($source) as $spec) {
+            if ($spec['format'] === 'png' && $this->renderPng($original, $spec) === null) {
+                return null;
+            }
+        }
+
+        $pngs = [];
+        foreach ($this->getIcoSizes() as $size) {
+            # Transparent: browser tabs have their own background.
+            $variant = $this->renderPng($original, ['size' => $size, 'bg' => null, 'pad' => 0]);
+            $png = $variant ? $store->getAsString($variant->getFilename(), $variant->getHash(), $variant->getVariant()) : null;
+            if (!$png) {
+                return null;
+            }
+            $pngs[$size] = $png;
+        }
+        $ico = $store->setFromString(IcoWriter::build($pngs), $this->setPath($setId, 'favicon.ico'), null, null, [
+            'visibility' => AssetStore::VISIBILITY_PUBLIC,
+            'conflict' => AssetStore::CONFLICT_OVERWRITE,
+        ]);
+
+        return ['src' => $srcHash, 'ico' => (string) ($ico['Hash'] ?? ''), 'done' => true];
+    }
+
+    /**
+     * Draw (or reuse, when the store already has it) one PNG variant of a set's source, through the
+     * framework's image backend.
+     *
+     * @param array<string, mixed> $spec size, bg, pad
+     */
+    protected function renderPng(DBFile $original, array $spec): ?DBFile
+    {
+        $result = $original->manipulateImage(
+            $this->variantName($spec),
+            IconRenderer::singleton()->square((int) $spec['size'], $spec['bg'] ?: null, (float) $spec['pad'])
+        );
+        return $result instanceof DBFile ? $result : null;
+    }
+
+    /**
+     * Asset variant name for a spec. The set folder already encodes the source and config, so the
+     * name only needs to tell the variants of one set apart.
+     *
+     * @param array<string, mixed> $spec
+     */
+    public function variantName(array $spec): string
+    {
+        $name = 'Favicon' . (int) $spec['size'] . (!empty($spec['bg']) ? 'Opaque' : 'Clear');
+        $pad = (int) round((float) ($spec['pad'] ?? 0) * 10);
+        return $pad > 0 ? $name . 'Pad' . $pad : $name;
+    }
+
+    /**
+     * [filename, hash, variant] of a variant in the AssetStore.
+     *
+     * @param array<string, mixed> $set Registry entry
+     * @param array<string, mixed> $spec
+     * @return array{0:string, 1:?string, 2:?string}
+     */
+    protected function locate(array $set, array $spec): array
+    {
+        if ($spec['format'] === 'ico') {
+            return [$this->setPath($set['id'], 'favicon.ico'), $set['ico'] ?: null, null];
+        }
+        return [$this->setPath($set['id'], 'icon.png'), $set['src'] ?: null, $this->variantName($spec)];
+    }
+
+    protected function getOriginal(string $setId, string $hash): DBFile
+    {
+        /** @var DBFile $file */
+        $file = DBFile::create_field(DBFile::class, ['Filename' => $this->setPath($setId, 'icon.png'), 'Hash' => $hash]);
+        return $file;
+    }
+
+    public function setPath(string $setId, string $name): string
+    {
+        return trim((string) $this->config()->get('asset_folder'), '/') . '/' . $setId . '/' . $name;
+    }
+
+    /**
+     * Remove a set's files: the source copy with all its variants, and favicon.ico.
+     *
+     * @param array<string, mixed> $entry
+     */
+    protected function deleteSet(string $setId, array $entry): void
+    {
+        $store = $this->getStore();
+        if (!empty($entry['src'])) {
+            # AssetStore::delete() removes the file and every variant of it.
+            $store->delete($this->setPath($setId, 'icon.png'), (string) $entry['src']);
+        }
+        if (!empty($entry['ico'])) {
+            $store->delete($this->setPath($setId, 'favicon.ico'), (string) $entry['ico']);
+        }
+    }
+
+    /**
+     * Registry of generated sets, kept in the module cache. When that cache is cleared the registry
+     * is lost and the set it named is left in the store (a few small files); the next generation
+     * then cannot clean it up. See the README for removing such leftovers.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public function getSets(): array
+    {
+        $sets = $this->getCache()->get(self::SETS_KEY);
+        return is_array($sets) ? $sets : [];
+    }
+
+    /**
+     * @param array<string, mixed> $entry
+     */
+    protected function registerSet(string $setId, array $entry): void
+    {
+        $sets = $this->getSets();
+        $sets[$setId] = $entry;
+        $this->getCache()->set(self::SETS_KEY, $sets);
+    }
+
+    protected function forgetSet(string $setId): void
+    {
+        $sets = $this->getSets();
+        if (isset($sets[$setId])) {
+            $sets[$setId]['done'] = false;
+            $this->getCache()->set(self::SETS_KEY, $sets);
+        }
+    }
+
+    public function getStore(): AssetStore
+    {
+        return Injector::inst()->get(AssetStore::class);
     }
 
     # ---------------------------------------------------------------------------------------------
-    # Manifest
+    # Manifest and theme colour
     # ---------------------------------------------------------------------------------------------
+
+    /**
+     * The theme colour: `theme_color`, else admintweaks' ThemeBrowserColor when set (see
+     * use_admintweaks), else null.
+     */
+    public function getThemeColor(): ?string
+    {
+        $color = trim((string) $this->config()->get('theme_color'));
+        if ($color !== '') {
+            return $color;
+        }
+        if ($this->config()->get('use_admintweaks') && class_exists(SiteConfig::class)
+            && SiteConfig::singleton()->hasField('ThemeBrowserColor')
+        ) {
+            $color = trim((string) SiteConfig::current_site_config()->ThemeBrowserColor);
+            # Only a plain hex colour: the field is free text in the CMS, and the value ends up in a
+            # meta tag and the manifest.
+            if (preg_match('/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i', $color)) {
+                return $color;
+            }
+        }
+        return null;
+    }
 
     /**
      * @return array<string, mixed>
@@ -701,17 +1001,14 @@ class FaviconService
         $fields['short_name'] = $fields['short_name'] ?: $fields['name'];
         $fields['start_url'] = $fields['start_url'] ?: Director::baseURL();
         $fields['background_color'] = $fields['background_color'] ?: $cfg->get('background_color');
-        $fields['theme_color'] = $fields['theme_color'] ?: $cfg->get('theme_color');
+        $fields['theme_color'] = $fields['theme_color'] ?: $this->getThemeColor();
 
         $base = rtrim(Director::baseURL(), '/');
         $icons = [];
-        if ($source && $this->canRasterise($source)) {
+        if ($source && !$this->hasFailed($source)) {
             $icons[] = ['src' => $base . '/icon-192.png', 'sizes' => '192x192', 'type' => 'image/png'];
             $icons[] = ['src' => $base . '/icon-512.png', 'sizes' => '512x512', 'type' => 'image/png'];
             $icons[] = ['src' => $base . '/icon-maskable-512.png', 'sizes' => '512x512', 'type' => 'image/png', 'purpose' => 'maskable'];
-        }
-        if ($source && $source->isSvg()) {
-            $icons[] = ['src' => $base . '/icon.svg', 'sizes' => 'any', 'type' => 'image/svg+xml'];
         }
         $fields['icons'] = $icons;
 
@@ -740,8 +1037,12 @@ class FaviconService
     }
 
     /**
-     * The modern minimal set: ico, svg (when the source is one), apple-touch-icon, manifest,
-     * theme-color. Every URL carries ?v= so a changed icon is picked up despite long cache lifetimes.
+     * The modern minimal set: ico, apple-touch-icon, manifest, theme-color. Every URL carries ?v= so
+     * a changed icon is picked up despite long cache lifetimes.
+     *
+     * The set is generated here when it does not exist yet (once per icon or config change), so the
+     * tags only ever point at files that could be produced: a PNG the backend cannot decode yields no
+     * icon tags rather than a page full of broken links.
      */
     public function getHeadTags(): string
     {
@@ -749,6 +1050,7 @@ class FaviconService
         if (!$source) {
             return '';
         }
+        $this->ensureSet($source);
         $variants = $this->getVariants($source);
         $v = $this->getVersion($source);
         $base = rtrim(Director::baseURL(), '/');
@@ -758,16 +1060,13 @@ class FaviconService
         if (isset($variants['favicon.ico'])) {
             $tags[] = '<link rel="icon" href="' . $url('favicon.ico') . '" sizes="32x32">';
         }
-        if (isset($variants['icon.svg'])) {
-            $tags[] = '<link rel="icon" href="' . $url('icon.svg') . '" type="image/svg+xml">';
-        }
         if (isset($variants['apple-touch-icon.png'])) {
             $tags[] = '<link rel="apple-touch-icon" href="' . $url('apple-touch-icon.png') . '">';
         }
         if (isset($variants['site.webmanifest'])) {
             $tags[] = '<link rel="manifest" href="' . $url('site.webmanifest') . '">';
         }
-        $theme = (string) $this->config()->get('theme_color');
+        $theme = (string) $this->getThemeColor();
         if ($theme !== '') {
             $tags[] = '<meta name="theme-color" content="' . htmlspecialchars($theme, ENT_QUOTES) . '">';
         }
@@ -779,36 +1078,51 @@ class FaviconService
     # ---------------------------------------------------------------------------------------------
 
     /**
-     * One-line human-readable status: which source is active and what can be served from it.
+     * Human-readable status: which source is active, and why any higher-precedence one was skipped.
      */
     public function getStatusMessage(): string
     {
-        $source = $this->getSource();
-        if (!$source) {
-            return _t(__CLASS__ . '.STATUS_NONE', 'No favicon source configured; nothing is served.');
-        }
-        if ($this->canRasterise($source)) {
-            $msg = _t(__CLASS__ . '.STATUS_OK', 'Serving all favicon variants from {origin}.', ['origin' => $source->getOrigin()]);
-            if (!$source->isSvg()) {
-                $dims = ImageProcessor::dimensions($source->getContents());
-                if ($dims && min($dims) < self::MASTER_SIZE) {
-                    $msg .= ' ' . _t(
-                        __CLASS__ . '.STATUS_SMALL',
-                        'The source is {w}x{h} px; use at least 512x512 px for sharp touch icons.',
-                        ['w' => $dims[0], 'h' => $dims[1]]
-                    );
-                }
+        $lines = [];
+        $active = null;
+        foreach ($this->getSourceCandidates() as $candidate) {
+            if (!$candidate->isUsable()) {
+                $lines[] = _t(
+                    __CLASS__ . '.STATUS_SKIPPED',
+                    'Skipped {origin}: {error}',
+                    ['origin' => $candidate->getOrigin(), 'error' => $candidate->getError()]
+                );
+                continue;
             }
-            return $msg;
+            $active = $candidate;
+            break;
         }
-        if ($source->isSvg()) {
-            return _t(
-                __CLASS__ . '.STATUS_NO_RASTERISER',
-                'Only icon.svg is served from {origin}: this server cannot convert SVG to PNG (install the Imagick extension with SVG support, or rsvg-convert), so favicon.ico and the touch icons are missing. Upload a PNG or configure a PNG source to serve them.',
-                ['origin' => $source->getOrigin()]
+        if (!$active) {
+            $lines[] = _t(__CLASS__ . '.STATUS_NONE', 'No usable favicon source; nothing is served.');
+        } elseif ($this->ensureSet($active) === null) {
+            $lines[] = _t(
+                __CLASS__ . '.STATUS_FAILED',
+                'The image backend could not read {origin}; no icons are served. Check that it is an intact PNG.',
+                ['origin' => $active->getOrigin()]
             );
+        } else {
+            $lines[] = _t(__CLASS__ . '.STATUS_OK', 'Serving all favicon variants from {origin}.', ['origin' => $active->getOrigin()]);
         }
-        return _t(__CLASS__ . '.STATUS_NO_GD', 'Neither GD nor Imagick is available, so no PNG variants can be generated.');
+        return implode(' ', $lines);
+    }
+
+    /**
+     * Whether a source is set but nothing usable is served from it (for a red dev/build line).
+     */
+    public function isDegraded(): bool
+    {
+        $candidates = $this->getSourceCandidates();
+        if (!$candidates) {
+            return false;
+        }
+        # Red also when a higher-precedence source is set but skipped: what is served is then not
+        # what the site owner set.
+        $first = $candidates[0];
+        return !$first->isUsable() || $this->ensureSet($first) === null;
     }
 
     # ---------------------------------------------------------------------------------------------
@@ -818,15 +1132,6 @@ class FaviconService
     public function getCache(): CacheInterface
     {
         return Injector::inst()->get(CacheInterface::class . '.RestructFavicons');
-    }
-
-    protected function warnNoRasteriser(IconSource $source): void
-    {
-        $this->warnOnce(
-            'norast:' . $source->getHash(),
-            'Favicon source ' . $source->getOrigin() . ' is SVG and no SVG rasteriser is available;'
-            . ' only icon.svg is served. Install ext-imagick with an SVG delegate, or rsvg-convert, or use a PNG source.'
-        );
     }
 
     /**

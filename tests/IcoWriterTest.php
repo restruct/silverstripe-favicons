@@ -4,19 +4,27 @@ namespace Restruct\Favicons\Tests;
 
 use InvalidArgumentException;
 use Restruct\Favicons\Generator\IcoWriter;
-use Restruct\Favicons\Generator\ImageProcessor;
+use Restruct\Favicons\FaviconService;
 use SilverStripe\Dev\SapphireTest;
 
 class IcoWriterTest extends SapphireTest
 {
     protected $usesDatabase = false;
 
+    /**
+     * PNG signature and IHDR for an n x n image plus filler: IcoWriter packs payloads as they are,
+     * so the container can be tested without an image library drawing real ones.
+     */
+    private function pngHeader(int $n): string
+    {
+        return "\x89PNG\r\n\x1a\n" . pack('N', 13) . 'IHDR' . pack('NN', $n, $n) . str_repeat("\0", 20 + $n);
+    }
+
     public function testBuildProducesAValidContainerWithPngEntries()
     {
-        $src = file_get_contents(__DIR__ . '/fixtures/icon.png');
         $pngs = [];
         foreach ([48, 16, 32] as $size) {
-            $pngs[$size] = ImageProcessor::create()->square($src, $size);
+            $pngs[$size] = $this->pngHeader($size);
         }
         $ico = IcoWriter::build($pngs);
 
@@ -34,14 +42,14 @@ class IcoWriterTest extends SapphireTest
             $this->assertSame($offset, $entry['offset'], 'payloads are contiguous after the directory');
             $offset += $entry['size'];
             $this->assertStringStartsWith("\x89PNG", $entry['data']);
-            $this->assertSame([$entry['width'], $entry['width']], ImageProcessor::dimensions($entry['data']));
+            $this->assertSame([$entry['width'], $entry['width']], FaviconService::pngDimensions($entry['data']));
         }
         $this->assertSame(strlen($ico), $offset, 'no trailing bytes');
     }
 
     public function testSize256IsEncodedAsZero()
     {
-        $png = ImageProcessor::create()->square(file_get_contents(__DIR__ . '/fixtures/icon.png'), 256);
+        $png = $this->pngHeader(256);
         $ico = IcoWriter::build([256 => $png]);
         # The width byte of the first directory entry
         $this->assertSame(0, ord($ico[6]));

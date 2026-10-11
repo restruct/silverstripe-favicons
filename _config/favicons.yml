@@ -13,9 +13,10 @@ SilverStripe\Core\Injector\Injector:
     properties:
       Middlewares:
         FaviconMiddleware: '%$Restruct\Favicons\Control\FaviconMiddleware'
-  # Generated variants and source hashes. Kept out of the in-memory layer (APCu on SS5): the
-  # entries are binary images, only read on a cache miss of the browser/CDN, so memory is better
-  # spent elsewhere. No expiry: keys contain the source version, so stale entries are never read.
+  # Source hashes and checks, the registry of generated sets, failure markers. The images
+  # themselves live in the AssetStore. Kept out of the in-memory layer (APCu on SS5) so every
+  # process sees the same registry. No expiry: keys contain the content hash, so stale entries
+  # are never read.
   Psr\SimpleCache\CacheInterface.RestructFavicons:
     factory: SilverStripe\Core\Cache\CacheFactory
     constructor:
