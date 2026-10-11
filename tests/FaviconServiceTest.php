@@ -605,6 +605,11 @@ class FaviconServiceTest extends SapphireTest
 
         $this->assertNotNull($this->service()->ensureSet($this->service()->getSource()));
         $this->assertSame(1, count(array_keys(FavSpyBackend::$widths, 1024)), 'the 1024 px source is decoded once');
+        # Every image a backend received: that decode, the shrunk source (stored as icon.png), and
+        # the 10 distinct variants drawn (7 PNGs: apple-touch-icon.png and the 180x180 one are the
+        # same variant; 3 ICO entries). A backend decoding the stored copy again for each variant
+        # would add one 512 px entry per variant.
+        $this->assertCount(12, FavSpyBackend::$widths, json_encode(FavSpyBackend::$widths));
         $this->assertSame([], array_filter(FavSpyBackend::$widths, fn($w) => $w > 512 && $w !== 1024), 'nothing larger than needed is drawn');
         $this->assertSame([512, 512], FaviconService::pngDimensions((string) $this->read('icon-512.png')));
         $s = $this->service();

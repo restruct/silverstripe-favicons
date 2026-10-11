@@ -1000,14 +1000,39 @@ class FaviconService
      * Draw (or reuse, when the store already has it) one PNG variant of a set's source, through the
      * framework's image backend.
      *
+     * DBFile::manipulate() rather than manipulateImage(): the latter has the backend decode the
+     * stored file before every variant, while all variants here are drawn from one decoded master.
+     * The variant is still encoded and written by the backend, as manipulateImage() would.
+     *
      * @param array<string, mixed> $spec size, bg, pad
      * @param object $master The decoded source to draw from
      */
     protected function renderPng(DBFile $original, array $spec, object $master): ?DBFile
     {
-        $result = $original->manipulateImage(
+        $result = $original->manipulate(
             $this->variantName($spec),
-            IconRenderer::singleton()->square((int) $spec['size'], $spec['bg'] ?: null, (float) $spec['pad'], $master)
+            function ($store, $filename, $hash, $variant) use ($original, $spec, $master) {
+                $backend = $original->getImageBackend();
+                if (!$backend) {
+                    return [null, null];
+                }
+                $drawn = IconRenderer::singleton()->drawOn(
+                    $backend,
+                    $master,
+                    (int) $spec['size'],
+                    $spec['bg'] ?: null,
+                    (float) $spec['pad']
+                );
+                try {
+                    $tuple = $drawn->writeToStore($store, $filename, $hash, $variant, [
+                        'conflict' => AssetStore::CONFLICT_USE_EXISTING,
+                    ]);
+                } finally {
+                    # Free the drawn image now rather than when the set is complete.
+                    $drawn->setImageResource(null);
+                }
+                return [$tuple, null];
+            }
         );
         return $result instanceof DBFile ? $result : null;
     }

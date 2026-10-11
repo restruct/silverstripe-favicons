@@ -12,9 +12,9 @@ use SilverStripe\Core\Injector\Injectable;
  * Draws one square icon variant (size, optional opaque background, optional margin) on the
  * framework's image backend.
  *
- * Used as the callback of DBFile::manipulateImage(), so the backend is whatever Image_Backend the
- * project has configured through the Injector, the result is written to the AssetStore by the
- * framework, and an existing variant is reused instead of redrawn.
+ * Used inside DBFile::manipulate(), so the backend is whatever Image_Backend the project has
+ * configured through the Injector, the backend writes the result to the AssetStore, and an existing
+ * variant is reused instead of redrawn.
  *
  * Why not the backend's own Pad()/ResizedImage(): those keep a transparent source transparent (iOS
  * paints transparency black on a home screen) and cannot add a margin to an image that is already
@@ -28,30 +28,24 @@ class IconRenderer
     use Injectable;
 
     /**
-     * A manipulateImage() callback producing a $size x $size square.
+     * A copy of $backend (same asset container, so it writes the variant next to its file) holding
+     * a $size x $size square drawn from $master.
      *
+     * The decoded source is passed in rather than read from $backend: DBFile::manipulateImage()
+     * makes the backend decode the stored file for every variant, so FaviconService uses
+     * manipulate() with this instead, and the source is decoded once per set.
+     *
+     * @param object $master The decoded (and shrunk, see shrink()) source, Intervention v2 or v3
      * @param string|null $background CSS hex colour to fill behind the icon, or null for transparent
      * @param float $padding Margin per side in % of the edge
-     * @param object|null $master An already decoded source to draw from (see shrink()); without it
-     *                            the backend decodes the stored file, once per variant
-     * @return callable(Image_Backend): ?Image_Backend
      */
-    public function square(int $size, ?string $background = null, float $padding = 0, ?object $master = null): callable
+    public function drawOn(Image_Backend $backend, object $master, int $size, ?string $background = null, float $padding = 0): Image_Backend
     {
-        return function (Image_Backend $backend) use ($size, $background, $padding, $master): ?Image_Backend {
-            $resource = $master ?? $backend->getImageResource();
-            if (!$resource) {
-                # The backend could not decode the stored source (corrupt PNG). It records that in
-                # its own error cache; returning null makes manipulateImage() return null too.
-                return null;
-            }
-            # A clone of the backend, because manipulateImage() clears the resource of the backend it
-            # passed in once the callback returns (same pattern as
-            # InterventionBackend::createCloneWithResource()).
-            $clone = clone $backend;
-            $clone->setImageResource($this->draw($resource, $size, $background, $padding));
-            return $clone;
-        };
+        # A clone, so the backend the framework caches for the stored file is left as it was (same
+        # pattern as InterventionBackend::createCloneWithResource()).
+        $clone = clone $backend;
+        $clone->setImageResource($this->draw($master, $size, $background, $padding));
+        return $clone;
     }
 
     /**
