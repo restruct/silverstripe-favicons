@@ -62,7 +62,7 @@ login pages.
 
 ## The source icon
 
-One **PNG**, **square**, at least **512x512 px** (and at most `max_source_size`, 4096 px by
+One **PNG**, **square**, at least **512x512 px** (and at most `max_source_size`, 2048 px by
 default). A transparent background is fine and usually best: the variants that must be opaque get
 `background_color` behind the icon.
 
@@ -130,6 +130,12 @@ description says what is currently being served.
 
 ### With silverstripe-admintweaks
 
+admintweaks' field is a general file picker: it also accepts a file **chosen from the files
+area**, including one whose CanView is restricted, and does not check the image. Whatever it holds,
+once it is a usable PNG, is **published at the icon paths** (as a re-encoded copy, see
+[Storage](#storage)), whatever its permissions. Set `use_admintweaks: false` if editors use that
+field for anything that must not be public.
+
 Besides the icon (above), admintweaks' **`SiteConfig.ThemeBrowserColor`** is used as the theme
 colour (`<meta name="theme-color">` and the manifest's `theme_color`) when it holds a hex colour and
 `theme_color` is not configured. Set `use_admintweaks: false` to ignore both fields. This module's
@@ -171,25 +177,53 @@ Tags added to the `<head>` of frontend pages, the CMS and the Security (login) p
 The generated files live in the framework's **AssetStore**, so they work with whatever adapter the
 project uses (local disk, S3 and so on), under `assets/_favicons/<set>/`:
 
-- `icon.png`, a public copy of the source;
-- its PNG variants, stored as asset variants of that file (`icon__Favicon180Opaque.png` and so on)
-  and drawn through `DBFile::manipulateImage()`, so the framework writes them and reuses an
-  existing one instead of redrawing it;
+- `icon.png`: the source as the image backend re-encodes it after shrinking it to the largest
+  variant (512 px with the default sizes). Not the uploaded bytes: text, EXIF and other metadata
+  chunks in the original are not published;
+- its PNG variants, stored as asset variants of that file (`icon__Favicon180Opaque.png` and so on),
+  each drawn on and written by the framework's image backend; an existing one is reused, not
+  redrawn;
 - `favicon.ico`, packed from the 16/32/48 variants.
 
 None of these has a File record, so nothing appears in the CMS files area. `<set>` is a hash of
 the source content and the generation config (sizes, colours, margins), so a new icon or new config
-is a new folder. The set is generated once, on `dev/build` or on the first page or probe that needs
-it; after that a request reads the stored file. When a new set is complete, the previous one is
-deleted.
+is a new folder.
+
+**When a set is generated:** on `dev/build`, when the icon changes in Settings (on save and
+publish), and otherwise by the first icon request (`/favicon.ico` and the like, which browsers send
+on their own). **Never during a page render**: until a set is complete, pages carry no icon tags,
+and an error in the tag code is logged and leaves the tags out rather than breaking the page. One
+build per set runs at a time (a "busy" marker, `busy_ttl`): concurrent first requests get a 404
+instead of each decoding the source. A source the backend cannot decode, or whose decode kills the
+worker (memory or time limit), is remembered for `failure_ttl` and not retried in that time.
+
+When a new set is complete, the previous one is deleted. If the store refuses that delete (file
+permissions, a remote error, `dev/build` run as another user than the web server), the old files
+stay behind with one logged warning; nothing else is affected.
 
 Which sets exist is remembered in the module's cache
-(`Psr\SimpleCache\CacheInterface.RestructFavicons`). If that cache is cleared, the set it named is
-no longer known and is left behind when the next one is generated: a few small files. Delete
-`assets/_favicons/` (or that prefix in your bucket) to remove leftovers; the current set is
-regenerated on the next request. On several web servers with a shared remote store, point that
-cache at a shared backend (Redis, Memcached) like any other Silverstripe cache, so every server
-knows the same sets.
+(`Psr\SimpleCache\CacheInterface.RestructFavicons`), shared by all stages (it is not segmented by
+silverstripe/versioned, so dev/build, the CMS and the site see the same sets). If that cache is
+cleared, the set it named is no longer known: it is left behind when the next one is generated (a
+few small files), and the tags disappear until the next icon request or `dev/build` re-registers
+it. Delete `assets/_favicons/` (or that prefix in your bucket) to remove leftovers. On several web
+servers with a shared remote store, point that cache at a shared backend (Redis, Memcached) like
+any other Silverstripe cache, so every server knows the same sets.
+
+### Memory
+
+Generation decodes the source once, through the image backend. GD's bitmap memory is not counted
+against PHP's `memory_limit`, so watch the process size instead. Peak process size (RSS) of one
+generation, measured on PHP 8.3 with the default GD driver:
+
+| Source | Silverstripe 5 | Silverstripe 6 |
+|---|---|---|
+| 512 px | 54 MB | 50 MB |
+| 1024 px | 66 MB | 58 MB |
+| 2048 px | 99 MB | 79 MB |
+| 4096 px | 237 MB | 176 MB |
+
+That is why `max_source_size` defaults to 2048: a larger source adds nothing to a 512 px icon.
 
 ### Caching and serving
 
@@ -207,6 +241,7 @@ knows the same sets.
   protects a staging site's icons); middleware registered after it, such as URL specials, dev-URL
   confirmation, session-manager's LoginSession and versioned's stage handling, is skipped for icon
   requests (order listed from a booted SS5 and SS6 install).
+- A 304 carries the variant's `Content-Type` too (not required, but some proxies key on it).
 
 ## Configuration reference
 
@@ -218,7 +253,8 @@ All on `Restruct\Favicons\FaviconService`.
 | `allow_upload` | `false` | Show the upload field on Settings; a published upload overrules every other source |
 | `upload_folder` | `'favicon'` | Asset folder for uploads |
 | `use_admintweaks` | `true` | Use admintweaks' `FavIcon` and `ThemeBrowserColor` as fallbacks when set |
-| `max_source_size` | `4096` | Largest accepted source edge in px (decoding costs width x height x 4 bytes); 0 for no limit |
+| `max_source_size` | `2048` | Largest accepted source edge in px, see [Memory](#memory); 0 for no limit |
+| `busy_ttl` | `120` | Seconds a set counts as "being generated" if the worker building it dies |
 | `background_color` | `'#ffffff'` | Fill for the opaque variants (touch icons, maskable); also the manifest default |
 | `touch_icon_padding` | `0` | Margin around the icon on the touch icons, % of the edge per side |
 | `maskable_padding` | `10` | Margin on the maskable icon, % per side (10 keeps it inside Android's 80% safe circle) |
@@ -233,7 +269,7 @@ All on `Restruct\Favicons\FaviconService`.
 | `security_tags` | `true` | Add the tags on Security pages (login, lost password) |
 | `max_age` | `86400` | Cache lifetime for a bare probe, seconds |
 | `versioned_max_age` | `31536000` | Cache lifetime for a `?v=` URL, seconds (sent with `immutable`) |
-| `failure_ttl` | `600` | Seconds an undecodable source is remembered (variants withdrawn, not retried) |
+| `failure_ttl` | `600` | Seconds an undecodable source (or one that killed the worker) is remembered (variants withdrawn, not retried) |
 | `asset_folder` | `'_favicons'` | AssetStore folder for the generated sets |
 
 `manifest_fields` defaults: `name` and `short_name` empty (both fall back to the SiteConfig

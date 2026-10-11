@@ -20,8 +20,13 @@ First release (would be 1.0.0).
   safe-zone margin, and a web manifest. Drawn through the framework's own `Image_Backend` (via
   `DBFile::manipulateImage()`), with no GD or Imagick calls in the module.
 - Stored in the framework AssetStore under `_favicons/<set>/` (public, no File records, works with
-  remote adapters), keyed on the source content and config; the previous set is deleted once a new
-  one is complete.
+  remote adapters), keyed on the source content and config; the stored source is re-encoded (no
+  metadata chunks published); the previous set is deleted once a new one is complete, and a
+  failing delete is logged, not fatal.
+- Sets are generated on dev/build, when the icon changes in Settings, and by the first icon
+  request, one build at a time and from a single decode of the source; never during a page render.
+  Pages carry no icon tags until a set exists, and an error in the tag code leaves the tags out
+  instead of breaking the page. `max_source_size` defaults to 2048 px.
 - Served at the paths browsers probe, streamed from the AssetStore, including every
   `apple-touch-icon[-NxN][-precomposed].png` name (nearest generated size), `/manifest.json`, and
   any `extra_paths` aliases. Long-lived cache headers for versioned URLs, ETag and 304 for bare
