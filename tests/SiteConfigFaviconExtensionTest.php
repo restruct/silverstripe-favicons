@@ -147,4 +147,29 @@ class SiteConfigFaviconExtensionTest extends SapphireTest
         $config->FaviconSourceID = $small->ID;
         $this->assertTrue($config->validate()->isValid());
     }
+
+    public function testAnIconThatBecameUnusableNeverBlocksOtherEdits()
+    {
+        Config::modify()->set(FaviconService::class, 'allow_upload', true);
+        $file = Image::create();
+        $file->setFromLocalFile(__DIR__ . '/fixtures/icon.png', 'favicon/icon.png');
+        $file->write();
+        $file->publishSingle();
+        $config = SiteConfig::current_site_config();
+        $config->FaviconSourceID = $file->ID;
+        $config->write();
+
+        # The same File record later gets other content (replaced in the files area) and is published
+        $file->setFromLocalFile(__DIR__ . '/fixtures/small.png', 'favicon/icon.png');
+        $file->write();
+        $file->publishSingle();
+
+        # Editing anything else on Settings must still save, and pages must still render
+        $config = SiteConfig::current_site_config();
+        $config->Title = 'Renamed site';
+        $config->write();
+        $this->assertSame('Renamed site', SiteConfig::current_site_config()->Title);
+        $this->assertIsString(FaviconService::singleton()->getHeadTags());
+        $this->assertStringContainsString('Skipped upload:', FaviconService::singleton()->getStatusMessage());
+    }
 }

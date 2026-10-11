@@ -140,13 +140,38 @@ class SiteConfigFaviconExtension extends Extension
     }
 
     /**
+     * Generate the set as soon as the icon changes in the CMS, so the next page already links it.
+     * Only when a source relation changed: other Settings edits do not cost a check of the store.
+     * The upload itself is usually still a draft here (Settings publishes it after writing), which
+     * onAfterPublishRecursive() below covers.
+     */
+    protected function onAfterWrite(): void
+    {
+        $owner = $this->getOwner();
+        if ($owner->isChanged('FaviconSourceID') || ($owner->hasField('FavIconID') && $owner->isChanged('FavIconID'))) {
+            FaviconService::singleton()->warmUp();
+        }
+    }
+
+    /**
+     * Saving Settings publishes what SiteConfig owns (SS5 SiteConfigLeftAndMain, SS6 versioned's
+     * RecursivePublishableHandler), after which a new upload is live and can be generated.
+     * warmUp() is a cache read when the set already exists.
+     */
+    protected function onAfterPublishRecursive(): void
+    {
+        FaviconService::singleton()->warmUp();
+    }
+
+    /**
      * One dev/build line saying what is being served, so an unusable source is noticed at deploy
-     * time rather than in the 404 log. getStatusMessage() also generates the set when it does not
-     * exist yet, so the first visitor after a deploy does not pay for it.
+     * time rather than in the 404 log. The set is generated first, so the first visitor after a
+     * deploy does not pay for it.
      */
     protected function reportStatus(): void
     {
         $service = FaviconService::singleton();
+        $service->warmUp();
         $message = $service->getStatusMessage();
         # Red only for a source that is set but not (fully) used; "nothing configured yet" is a
         # normal state right after installing.

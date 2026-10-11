@@ -75,6 +75,11 @@ class FaviconMiddleware implements HTTPMiddleware
                 return null;
             }
             $response = HTTPResponse::create('', 304);
+            # Not required on a 304, but some proxies log or cache by it.
+            $type = $service->getVariants()[$variant]['type'] ?? null;
+            if ($type) {
+                $response->addHeader('Content-Type', $type);
+            }
             $response->addHeader('ETag', $etag);
             $response->addHeader('Cache-Control', $cacheControl);
             return $response;

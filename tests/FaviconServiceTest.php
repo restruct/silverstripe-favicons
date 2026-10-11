@@ -5,6 +5,8 @@ namespace Restruct\Favicons\Tests;
 use Restruct\Favicons\FaviconService;
 use Restruct\Favicons\Generator\IcoWriter;
 use Restruct\Favicons\Tests\Stub\FavSpyBackend;
+use Restruct\Favicons\Tests\Stub\FavStoreDouble;
+use Restruct\Favicons\Tests\Stub\FavThrowingTagsService;
 use SilverStripe\Assets\Dev\TestAssetStore;
 use SilverStripe\Assets\File;
 use SilverStripe\Assets\Image;
@@ -15,6 +17,7 @@ use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Injector\Injector;
 use SilverStripe\Dev\SapphireTest;
 use SilverStripe\SiteConfig\SiteConfig;
+use SilverStripe\Versioned\Versioned;
 
 class FaviconServiceTest extends SapphireTest
 {
@@ -351,7 +354,8 @@ class FaviconServiceTest extends SapphireTest
 
         $original = '_favicons/' . $setId . '/icon.png';
         $this->assertTrue($store->exists($original, $set['src']));
-        $this->assertSame(sha1_file($this->fixture('icon.png')), $set['src'], 'the original is the source, byte for byte');
+        $this->assertSame(sha1($store->getAsString($original, $set['src'])), $set['src']);
+        $this->assertSame([512, 512], FaviconService::pngDimensions((string) $store->getAsString($original, $set['src'])));
         $this->assertSame(AssetStore::VISIBILITY_PUBLIC, $store->getVisibility($original, $set['src']));
 
         foreach (['apple-touch-icon.png', 'icon-192.png', 'icon-maskable-512.png'] as $name) {
@@ -508,6 +512,7 @@ class FaviconServiceTest extends SapphireTest
     {
         Config::modify()->set(FaviconService::class, 'theme_color', '#abcdef');
         $s = $this->service();
+        $s->warmUp();
         $v = $s->getVersion();
         $tags = $s->getHeadTags();
         $this->assertStringContainsString('<link rel="icon" href="/favicon.ico?v=' . $v . '" sizes="32x32">', $tags);
@@ -515,6 +520,131 @@ class FaviconServiceTest extends SapphireTest
         $this->assertStringContainsString('<link rel="manifest" href="/site.webmanifest?v=' . $v . '">', $tags);
         $this->assertStringContainsString('<meta name="theme-color" content="#abcdef">', $tags);
         $this->assertStringNotContainsString('image/svg+xml', $tags);
-        $this->assertNotEmpty($s->getSets(), 'rendering the tags generated the set they point at');
+    }
+
+    # Page renders never generate, and never fail
+
+    public function testTagsNeedACompletedSetAndNeverGenerateOne()
+    {
+        $s = $this->service();
+        $this->assertSame('', $s->getHeadTags(), 'no tags before the set exists');
+        $this->assertSame([], $s->getSets(), 'rendering the tags generated nothing');
+        $this->assertStringContainsString('generated on the next dev/build or icon request', $s->getStatusMessage());
+        $this->assertSame([], $s->getSets(), 'nor did the status message');
+
+        # A probe generates it; from then on the tags are there
+        $this->assertNotNull($this->read('favicon.ico'));
+        $this->assertStringContainsString('rel="apple-touch-icon"', $s->getHeadTags());
+    }
+
+    public function testATagErrorIsSwallowed()
+    {
+        $broken = new FavThrowingTagsService();
+        $this->assertSame('', $broken->getHeadTags(), 'logged, not thrown');
+    }
+
+    public function testRegistryIsSharedAcrossReadingModes()
+    {
+        # dev/build and the CMS run in Stage, pages in Live, the icon middleware before any reading
+        # mode is set: all must see the same registry
+        Versioned::withVersionedMode(function () {
+            Versioned::set_stage(Versioned::DRAFT);
+            $this->service()->warmUp();
+        });
+        Versioned::withVersionedMode(function () {
+            Versioned::set_stage(Versioned::LIVE);
+            $this->assertNotNull($this->service()->getCompletedSet(), 'Live sees the set built in Stage');
+        });
+        Versioned::withVersionedMode(function () {
+            Versioned::set_reading_mode('');
+            $this->assertNotNull($this->service()->getCompletedSet(), 'nor does a request without a reading mode miss it');
+        });
+    }
+
+    public function testFailingDeleteOfThePreviousSetDoesNotBreakAnything()
+    {
+        $s = $this->service();
+        $first = $s->ensureSet($s->getSource());
+        FavStoreDouble::install();
+        FavStoreDouble::$throwOnDelete = true;
+
+        Config::modify()->set(FaviconService::class, 'source', $this->fixture('icon2.png'));
+        $second = $s->ensureSet($s->getSource());
+        $this->assertNotNull($second, 'the new set is built although the old one cannot be deleted');
+        $this->assertSame([$second['id']], array_keys($s->getSets()), 'the registry is written anyway');
+        $this->assertNotSame('', $s->getHeadTags());
+        $this->assertNotNull($this->read('favicon.ico'));
+        $this->assertNotSame($first['id'], $second['id']);
+    }
+
+    public function testBusyMarkerPreventsAParallelBuild()
+    {
+        $s = $this->service();
+        $source = $s->getSource();
+        $busyKey = 'busy_' . $s->getSetId($source);
+        $s->getCache()->set($busyKey, 1, 60);
+
+        $this->assertNull($s->ensureSet($source), 'another request is building it');
+        $this->assertNull($this->read('icon-192.png'), 'so the probe 404s instead of decoding again');
+        $this->assertFalse($s->hasFailed($source), 'busy is not a failure');
+        $this->assertSame([], $s->getSets());
+
+        $s->getCache()->delete($busyKey);
+        $this->assertNotNull($s->ensureSet($source));
+        $this->assertFalse((bool) $s->getCache()->get($busyKey), 'the marker is removed after the build');
+    }
+
+    public function testSourceIsDecodedOnceAndShrunkBeforeDrawing()
+    {
+        Injector::inst()->load([Image_Backend::class => [
+            'class' => FavSpyBackend::class,
+            'factory' => '%$SilverStripe\\Assets\\ImageBackendFactory',
+        ]]);
+        Injector::inst()->unregisterNamedObject('SilverStripe\\Assets\\ImageBackendFactory');
+        Config::modify()->set(FaviconService::class, 'source', $this->fixture('icon1024.png'));
+
+        $this->assertNotNull($this->service()->ensureSet($this->service()->getSource()));
+        $this->assertSame(1, count(array_keys(FavSpyBackend::$widths, 1024)), 'the 1024 px source is decoded once');
+        $this->assertSame([], array_filter(FavSpyBackend::$widths, fn($w) => $w > 512 && $w !== 1024), 'nothing larger than needed is drawn');
+        $this->assertSame([512, 512], FaviconService::pngDimensions((string) $this->read('icon-512.png')));
+    }
+
+    public function testMetadataOfTheSourceIsNotPublished()
+    {
+        Config::modify()->set(FaviconService::class, 'source', $this->fixture('icon-meta.png'));
+        $s = $this->service();
+        $set = $s->ensureSet($s->getSource());
+        $stored = (string) $s->getStore()->getAsString($s->setPath($set['id'], 'icon.png'), $set['src']);
+        $this->assertStringStartsWith("\x89PNG", $stored);
+        $this->assertStringNotContainsString('private-author-note', $stored, 'the stored copy is re-encoded, not copied');
+    }
+
+    public function testAnotherRequestsUnfinishedSetIsNotDeleted()
+    {
+        $s = $this->service();
+        # Another request is building a set for another source right now
+        $s->getCache()->set('sets', ['otherset00000000' => ['src' => 'x', 'ico' => null, 'done' => false]]);
+        $s->getCache()->set('busy_otherset00000000', 1, 60);
+        $set = $s->ensureSet($s->getSource());
+        $this->assertEqualsCanonicalizing([$set['id'], 'otherset00000000'], array_keys($s->getSets()));
+
+        # Once that request is gone (no marker), its leftover goes, also on the done-set path
+        $s->getCache()->delete('busy_otherset00000000');
+        $s->ensureSet($s->getSource());
+        $this->assertSame([$set['id']], array_keys($s->getSets()));
+    }
+
+    public function testSetRemovedWhileBuildingIsNotAFailure()
+    {
+        $s = $this->service();
+        $source = $s->getSource();
+        FavStoreDouble::install();
+        # The stored copy disappears underneath the build (another request's cleanup)
+        FavStoreDouble::$vanished = [$s->setPath($s->getSetId($source), 'icon.png')];
+        $this->assertNull($s->ensureSet($source));
+        $this->assertFalse($s->hasFailed($source), 'not reported as an undecodable source');
+
+        FavStoreDouble::$vanished = [];
+        $this->assertNotNull($s->ensureSet($source), 'the next request builds it');
     }
 }

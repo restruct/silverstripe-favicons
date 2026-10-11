@@ -10,6 +10,7 @@ use Psr\SimpleCache\CacheInterface;
 use Restruct\Favicons\Generator\IconRenderer;
 use Restruct\Favicons\Generator\IcoWriter;
 use SilverStripe\Assets\File;
+use SilverStripe\Assets\Image_Backend;
 use SilverStripe\Assets\Storage\AssetStore;
 use SilverStripe\Assets\Storage\DBFile;
 use SilverStripe\Control\Director;
@@ -97,12 +98,13 @@ class FaviconService
     private static bool $use_admintweaks = true;
 
     /**
-     * Largest accepted source edge. Decoding a bitmap costs width x height x 4 bytes of memory, so a
-     * mistaken 20000 px upload would otherwise exhaust memory_limit on every generation attempt.
+     * Largest accepted source edge. Decoding a bitmap costs at least width x height x 4 bytes (a
+     * 4096 px PNG is 64 MB before the decoder's own buffers), and generation runs inside a web
+     * request, so the default keeps the source to a size any icon can be drawn from.
      *
      * @config
      */
-    private static int $max_source_size = 4096;
+    private static int $max_source_size = 2048;
 
     /**
      * Fill colour for the opaque variants (apple-touch-icon*, maskable). iOS paints transparency
@@ -222,6 +224,14 @@ class FaviconService
     private static int $failure_ttl = 600;
 
     /**
+     * Seconds the "being generated" marker of a set lives. Deleted as soon as the build ends; the
+     * TTL only matters when the worker dies during the build (memory or time limit).
+     *
+     * @config
+     */
+    private static int $busy_ttl = 120;
+
+    /**
      * AssetStore folder the generated sets are written to.
      *
      * @config
@@ -239,6 +249,13 @@ class FaviconService
      * @var array<string, bool>
      */
     protected array $warned = [];
+
+    /**
+     * The source whose set is being built in this process, for the fatal-error shutdown handler.
+     */
+    protected ?IconSource $building = null;
+
+    protected bool $shutdownRegistered = false;
 
     # ---------------------------------------------------------------------------------------------
     # Source resolution
@@ -751,11 +768,46 @@ class FaviconService
     }
 
     /**
-     * The registry entry of the source's set, generating it into the AssetStore first if needed.
-     * Null when it cannot be generated (the failure is then remembered for failure_ttl).
+     * The registry entry of the source's set when it is complete, else null. Read-only: never
+     * generates, never touches the AssetStore, so it is safe on every page render.
      *
-     * Once a set is complete, any other registered set (an older icon or config) is deleted from
-     * the store, so only one set is kept.
+     * @return array{id:string, src:string, ico:?string, done:bool}|null
+     */
+    public function getCompletedSet(?IconSource $source = null): ?array
+    {
+        $source ??= $this->getSource();
+        if (!$source || $this->hasFailed($source)) {
+            return null;
+        }
+        $setId = $this->getSetId($source);
+        $entry = $this->getSets()[$setId] ?? null;
+        return is_array($entry) && !empty($entry['done']) ? ['id' => $setId] + $entry : null;
+    }
+
+    /**
+     * Generate the current source's set if it does not exist yet, without ever throwing. Called on
+     * dev/build and when the source changes in the CMS, so visitors find the set ready.
+     */
+    public function warmUp(): void
+    {
+        try {
+            $source = $this->getSource();
+            if ($source) {
+                $this->ensureSet($source);
+            }
+        } catch (Throwable $e) {
+            $this->warnOnce('warm:' . get_class($e) . $e->getMessage(), 'Favicon generation failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * The registry entry of the source's set, generating it into the AssetStore first if needed.
+     * Null when it cannot be generated now: another request is generating it (busy marker), or
+     * the source cannot be decoded (then remembered for failure_ttl).
+     *
+     * Not called on page renders (see getHeadTags()); only from the icon middleware, dev/build and
+     * the SiteConfig hooks. Once a set is complete, any other registered set (an older icon or
+     * config) is deleted from the store, so only one set is kept.
      *
      * @return array{id:string, src:string, ico:?string, done:bool}|null
      */
@@ -765,36 +817,95 @@ class FaviconService
             return null;
         }
         $setId = $this->getSetId($source);
-        $sets = $this->getSets();
-        $entry = $sets[$setId] ?? null;
+        $entry = $this->getSets()[$setId] ?? null;
         if (is_array($entry) && !empty($entry['done'])) {
+            # Leftovers of an earlier build that died half-way (or whose cleanup failed) go too.
+            $this->pruneSets($setId);
             return ['id' => $setId] + $entry;
         }
 
-        try {
-            $entry = $this->buildSet($source, $setId, is_array($entry) ? $entry : null);
-        } catch (Throwable $e) {
-            $this->warnOnce('gen:' . $setId, 'Favicon generation from ' . $source->getOrigin() . ' failed: ' . $e->getMessage());
-            $entry = null;
+        # One build per set at a time: concurrent first requests would otherwise each decode the
+        # source (tens of MB each) at once. The marker outlives a worker killed by a fatal error
+        # (memory or time limit) for busy_ttl, so a source that kills the worker is not retried by
+        # every following request either; see also the shutdown handler in buildGuarded().
+        $cache = $this->getCache();
+        $busyKey = $this->busyKey($setId);
+        if ($cache->get($busyKey)) {
+            return null;
         }
+        $cache->set($busyKey, 1, max(1, (int) $this->config()->get('busy_ttl')));
+        try {
+            $entry = $this->buildGuarded($source, $setId, is_array($entry) ? $entry : null);
+        } finally {
+            $cache->delete($busyKey);
+        }
+
         if ($entry === null) {
+            $registered = $this->getSets()[$setId] ?? null;
+            if (is_array($registered) && !empty($registered['src'])
+                && !$this->getStore()->exists($this->setPath($setId, 'icon.png'), (string) $registered['src'])
+            ) {
+                # The stored copy was removed while this set was being drawn (another request's
+                # cleanup, or by hand). That says nothing about the source: retry next time.
+                $this->warnOnce('gone:' . $setId, 'Favicon set ' . $setId . ' was removed while it was being generated; it is generated again on the next request.');
+                return null;
+            }
             $this->markFailed($source);
             $this->warnOnce('fail:' . $setId, 'Favicon source ' . $source->getOrigin() . ' could not be decoded by the image backend; no icon variants are served.');
             return null;
         }
 
-        # Re-read: another request may have registered sets meanwhile.
-        foreach ($this->getSets() as $id => $old) {
-            if ($id !== $setId && is_array($old)) {
-                $this->deleteSet((string) $id, $old);
-            }
-        }
-        $this->getCache()->set(self::SETS_KEY, [$setId => $entry]);
+        $this->registerSet($setId, $entry);
+        $this->pruneSets($setId);
         return ['id' => $setId] + $entry;
     }
 
     /**
-     * Generate every file of a set: the public copy of the source, its PNG variants, favicon.ico.
+     * buildSet() with every failure turned into null, and a fatal error (which no catch sees)
+     * remembered by a shutdown handler, so it is not retried before failure_ttl.
+     *
+     * @param array<string, mixed>|null $previous
+     * @return array{src:string, ico:?string, done:bool}|null
+     */
+    protected function buildGuarded(IconSource $source, string $setId, ?array $previous): ?array
+    {
+        $this->building = $source;
+        if (!$this->shutdownRegistered) {
+            $this->shutdownRegistered = true;
+            register_shutdown_function(function () {
+                $error = error_get_last();
+                if ($this->building && $error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true)) {
+                    try {
+                        $this->markFailed($this->building);
+                        $this->getCache()->delete($this->busyKey($this->getSetId($this->building)));
+                    } catch (Throwable $e) {
+                        # Nothing more can be done during shutdown.
+                    }
+                }
+            });
+        }
+        try {
+            return $this->buildSet($source, $setId, $previous);
+        } catch (Throwable $e) {
+            $this->warnOnce('gen:' . $setId, 'Favicon generation from ' . $source->getOrigin() . ' failed: ' . $e->getMessage());
+            return null;
+        } finally {
+            $this->building = null;
+        }
+    }
+
+    protected function busyKey(string $setId): string
+    {
+        return 'busy_' . $setId;
+    }
+
+    /**
+     * Generate every file of a set: a re-encoded copy of the source, its PNG variants, favicon.ico.
+     *
+     * The source is decoded once, through the framework's image backend, and shrunk in place to the
+     * largest edge any variant needs; every variant is drawn from that one decoded image. The copy
+     * stored as icon.png is that shrunk image as the backend encodes it, not the uploaded bytes, so
+     * metadata chunks in the original (text, EXIF, colour profiles) are not published.
      *
      * @param array<string, mixed>|null $previous An incomplete registry entry for this set
      * @return array{src:string, ico:?string, done:bool}|null
@@ -803,12 +914,21 @@ class FaviconService
     {
         $store = $this->getStore();
         $filename = $this->setPath($setId, 'icon.png');
-        $srcHash = (string) ($previous['src'] ?? $source->getHash());
 
-        # The source copy is a plain AssetStore file: no File record, so a YAML or theme source never
-        # appears in the CMS, and the folder is owned by this module alone.
-        if (!$store->exists($filename, $srcHash)) {
-            $result = $store->setFromString($source->getContents(), $filename, null, null, [
+        $backend = $this->decodeSource($source);
+        $master = $backend ? $backend->getImageResource() : null;
+        if (!$master) {
+            return null;
+        }
+        $renderer = IconRenderer::singleton();
+        $master = $renderer->shrink($master, $this->getLargestVariantSize());
+        $backend->setImageResource($master);
+
+        $srcHash = (string) ($previous['src'] ?? '');
+        if ($srcHash === '' || !$store->exists($filename, $srcHash)) {
+            # A plain AssetStore file: no File record, so a YAML or theme source never appears in
+            # the CMS, and the folder is owned by this module alone.
+            $result = $backend->writeToStore($store, $filename, null, null, [
                 'visibility' => AssetStore::VISIBILITY_PUBLIC,
                 'conflict' => AssetStore::CONFLICT_OVERWRITE,
             ]);
@@ -817,13 +937,13 @@ class FaviconService
                 return null;
             }
         }
-        # Registered before the variants are drawn, so a set that fails half-way is still deleted
-        # by the next successful one.
+        # Registered before the variants are drawn, so a set that fails half-way is still known
+        # (and deleted by the next successful one).
         $this->registerSet($setId, ['src' => $srcHash, 'ico' => null, 'done' => false]);
         $original = $this->getOriginal($setId, $srcHash);
 
         foreach ($this->getVariants($source) as $spec) {
-            if ($spec['format'] === 'png' && $this->renderPng($original, $spec) === null) {
+            if ($spec['format'] === 'png' && $this->renderPng($original, $spec, $master) === null) {
                 return null;
             }
         }
@@ -831,13 +951,14 @@ class FaviconService
         $pngs = [];
         foreach ($this->getIcoSizes() as $size) {
             # Transparent: browser tabs have their own background.
-            $variant = $this->renderPng($original, ['size' => $size, 'bg' => null, 'pad' => 0]);
+            $variant = $this->renderPng($original, ['size' => $size, 'bg' => null, 'pad' => 0], $master);
             $png = $variant ? $store->getAsString($variant->getFilename(), $variant->getHash(), $variant->getVariant()) : null;
             if (!$png) {
                 return null;
             }
             $pngs[$size] = $png;
         }
+        $backend->setImageResource(null);
         $ico = $store->setFromString(IcoWriter::build($pngs), $this->setPath($setId, 'favicon.ico'), null, null, [
             'visibility' => AssetStore::VISIBILITY_PUBLIC,
             'conflict' => AssetStore::CONFLICT_OVERWRITE,
@@ -847,16 +968,46 @@ class FaviconService
     }
 
     /**
+     * The source loaded into a fresh Image_Backend from the Injector, or null when the backend
+     * cannot decode it. The backend reads from a local path, so the bytes go through a temp file
+     * named after their hash (the backend remembers a failed path, which then means this content).
+     */
+    protected function decodeSource(IconSource $source): ?Image_Backend
+    {
+        $tmp = rtrim(TEMP_PATH, '/') . '/favicon-src-' . $source->getHash() . '.png';
+        if (file_put_contents($tmp, $source->getContents()) === false) {
+            return null;
+        }
+        try {
+            /** @var Image_Backend $backend */
+            $backend = Injector::inst()->createWithArgs(Image_Backend::class, []);
+            $backend->loadFrom($tmp);
+            return $backend->getImageResource() ? $backend : null;
+        } finally {
+            @unlink($tmp);
+        }
+    }
+
+    /**
+     * Largest edge any variant is drawn at: the source is shrunk to this once, before drawing.
+     */
+    protected function getLargestVariantSize(): int
+    {
+        return max(512, ...$this->getTouchSizes(), ...$this->getIcoSizes());
+    }
+
+    /**
      * Draw (or reuse, when the store already has it) one PNG variant of a set's source, through the
      * framework's image backend.
      *
      * @param array<string, mixed> $spec size, bg, pad
+     * @param object $master The decoded source to draw from
      */
-    protected function renderPng(DBFile $original, array $spec): ?DBFile
+    protected function renderPng(DBFile $original, array $spec, object $master): ?DBFile
     {
         $result = $original->manipulateImage(
             $this->variantName($spec),
-            IconRenderer::singleton()->square((int) $spec['size'], $spec['bg'] ?: null, (float) $spec['pad'])
+            IconRenderer::singleton()->square((int) $spec['size'], $spec['bg'] ?: null, (float) $spec['pad'], $master)
         );
         return $result instanceof DBFile ? $result : null;
     }
@@ -902,19 +1053,57 @@ class FaviconService
     }
 
     /**
-     * Remove a set's files: the source copy with all its variants, and favicon.ico.
+     * Remove a set's files: the source copy with all its variants, and favicon.ico. Never throws:
+     * a store that refuses the delete (permissions, a remote error, dev/build run as another user)
+     * leaves the files behind with one logged warning, rather than breaking the request.
      *
      * @param array<string, mixed> $entry
      */
     protected function deleteSet(string $setId, array $entry): void
     {
         $store = $this->getStore();
+        $files = [];
         if (!empty($entry['src'])) {
             # AssetStore::delete() removes the file and every variant of it.
-            $store->delete($this->setPath($setId, 'icon.png'), (string) $entry['src']);
+            $files[$this->setPath($setId, 'icon.png')] = (string) $entry['src'];
         }
         if (!empty($entry['ico'])) {
-            $store->delete($this->setPath($setId, 'favicon.ico'), (string) $entry['ico']);
+            $files[$this->setPath($setId, 'favicon.ico')] = (string) $entry['ico'];
+        }
+        foreach ($files as $filename => $hash) {
+            try {
+                $store->delete($filename, $hash);
+            } catch (Throwable $e) {
+                $this->warnOnce('del:' . $filename, 'Could not delete the previous favicon file ' . $filename . ': ' . $e->getMessage());
+            }
+        }
+    }
+
+    /**
+     * Delete every registered set except the current one, and drop them from the registry. A set
+     * that another request is still building (not done, busy marker alive) is left alone.
+     */
+    protected function pruneSets(string $currentId): void
+    {
+        $sets = $this->getSets();
+        $changed = false;
+        foreach ($sets as $id => $entry) {
+            $id = (string) $id;
+            if ($id === $currentId) {
+                continue;
+            }
+            if (is_array($entry) && empty($entry['done']) && $this->getCache()->get($this->busyKey($id))) {
+                continue;
+            }
+            if (is_array($entry)) {
+                $this->deleteSet($id, $entry);
+            }
+            unset($sets[$id]);
+            $changed = true;
+        }
+        if ($changed) {
+            # Written whatever the deletes did: a failed delete is logged, not retried forever.
+            $this->getCache()->set(self::SETS_KEY, $sets);
         }
     }
 
@@ -1040,17 +1229,27 @@ class FaviconService
      * The modern minimal set: ico, apple-touch-icon, manifest, theme-color. Every URL carries ?v= so
      * a changed icon is picked up despite long cache lifetimes.
      *
-     * The set is generated here when it does not exist yet (once per icon or config change), so the
-     * tags only ever point at files that could be produced: a PNG the backend cannot decode yields no
-     * icon tags rather than a page full of broken links.
+     * Read-only and never throws: a page render must not generate a set (that is done on dev/build,
+     * on a source change in the CMS and on the first icon probe) and must not fail because of an
+     * icon. Until a complete set exists no tags are emitted, so they only ever point at files that
+     * exist; meanwhile browsers still probe /favicon.ico, which generates the set.
      */
     public function getHeadTags(): string
     {
-        $source = $this->getSource();
-        if (!$source) {
+        try {
+            return $this->buildHeadTags();
+        } catch (Throwable $e) {
+            $this->warnOnce('tags:' . get_class($e) . $e->getMessage(), 'Favicon tags left out: ' . $e->getMessage());
             return '';
         }
-        $this->ensureSet($source);
+    }
+
+    protected function buildHeadTags(): string
+    {
+        $source = $this->getSource();
+        if (!$source || $this->getCompletedSet($source) === null) {
+            return '';
+        }
         $variants = $this->getVariants($source);
         $v = $this->getVersion($source);
         $base = rtrim(Director::baseURL(), '/');
@@ -1079,6 +1278,7 @@ class FaviconService
 
     /**
      * Human-readable status: which source is active, and why any higher-precedence one was skipped.
+     * Read-only (it is shown in the CMS); call warmUp() first to report on a generated set.
      */
     public function getStatusMessage(): string
     {
@@ -1098,10 +1298,16 @@ class FaviconService
         }
         if (!$active) {
             $lines[] = _t(__CLASS__ . '.STATUS_NONE', 'No usable favicon source; nothing is served.');
-        } elseif ($this->ensureSet($active) === null) {
+        } elseif ($this->hasFailed($active)) {
             $lines[] = _t(
                 __CLASS__ . '.STATUS_FAILED',
                 'The image backend could not read {origin}; no icons are served. Check that it is an intact PNG.',
+                ['origin' => $active->getOrigin()]
+            );
+        } elseif ($this->getCompletedSet($active) === null) {
+            $lines[] = _t(
+                __CLASS__ . '.STATUS_PENDING',
+                'The icons from {origin} are generated on the next dev/build or icon request.',
                 ['origin' => $active->getOrigin()]
             );
         } else {
@@ -1122,7 +1328,7 @@ class FaviconService
         # Red also when a higher-precedence source is set but skipped: what is served is then not
         # what the site owner set.
         $first = $candidates[0];
-        return !$first->isUsable() || $this->ensureSet($first) === null;
+        return !$first->isUsable() || $this->hasFailed($first);
     }
 
     # ---------------------------------------------------------------------------------------------

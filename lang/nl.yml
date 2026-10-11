@@ -7,6 +7,7 @@ nl:
     STATUS_SKIPPED: '{origin} overgeslagen: {error}'
     STATUS_NONE: 'Geen bruikbare favicon-bron; er wordt niets geserveerd.'
     STATUS_FAILED: 'De afbeeldingsverwerking kon {origin} niet lezen; er worden geen iconen geserveerd. Controleer of het een intacte PNG is.'
+    STATUS_PENDING: 'De iconen uit {origin} worden gemaakt bij de volgende dev/build of icoon-aanvraag.'
     STATUS_OK: 'Alle favicon-varianten worden geserveerd vanuit {origin}.'
   Restruct\Favicons\Extensions\SiteConfigFaviconExtension:
     FaviconSource: 'Site-icoon (favicon)'

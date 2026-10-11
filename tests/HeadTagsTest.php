@@ -26,9 +26,10 @@ class HeadTagsTest extends FunctionalTest
     protected function setUp(): void
     {
         parent::setUp();
-        # Rendering the tags generates the icon set into the AssetStore
         TestAssetStore::activate('HeadTagsTest');
         $this->pinFaviconConfig();
+        # Tags are only emitted for a generated set; a page render never generates one
+        FaviconService::singleton()->warmUp();
         # Prepended: a merge would append the rule after the CMS catch-all ($URLSegment//$Action),
         # which would claim the URL first and 404 it as a missing page.
         Config::modify()->set(

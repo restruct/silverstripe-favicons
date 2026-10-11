@@ -100,6 +100,7 @@ class AdmintweaksFallbackTest extends SapphireTest
         $this->assertNull($s->getThemeColor());
 
         $this->setSiteConfig(['ThemeBrowserColor' => '#336699']);
+        $s->warmUp();
         $this->assertSame('#336699', $s->getThemeColor());
         $this->assertStringContainsString('<meta name="theme-color" content="#336699">', $s->getHeadTags());
         $this->assertSame('#336699', json_decode($s->buildManifest(), true)['theme_color']);
