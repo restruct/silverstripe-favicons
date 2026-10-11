@@ -444,6 +444,21 @@ class FaviconServiceTest extends SapphireTest
         $this->assertSame([$third['id']], array_keys($s->getSets()));
     }
 
+    public function testACopyAnotherServerStoredIsKept()
+    {
+        $s = $this->service();
+        $source = $s->getSource();
+        $filename = $s->setPath($s->getSetId($source), 'icon.png');
+        # Another server built this set first, and its libgd encoded the copy to other bytes
+        $png = (string) file_get_contents($this->fixture('icon.png')) . "\0";
+        $theirs = $s->getStore()->setFromString($png, $filename, null, null, [
+            'visibility' => AssetStore::VISIBILITY_PUBLIC,
+        ]);
+        $set = $s->ensureSet($source);
+        $this->assertSame($theirs['Hash'], $set['src'], 'their copy is used, not overwritten');
+        $this->assertSame($png, $s->getStore()->getAsString($filename, $set['src']));
+    }
+
     public function testFileRemovedFromTheStoreIsRegenerated()
     {
         $s = $this->service();
