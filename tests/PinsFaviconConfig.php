@@ -2,7 +2,11 @@
 
 namespace Restruct\Favicons\Tests;
 
+use Psr\SimpleCache\CacheInterface;
 use Restruct\Favicons\FaviconService;
+use SilverStripe\Core\Injector\Injector;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use Symfony\Component\Cache\Psr16Cache;
 use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Config;
 
@@ -57,8 +61,10 @@ trait PinsFaviconConfig
         # (or a different host name) must not change them.
         Config::modify()->set(Director::class, 'alternate_base_url', '/');
 
-        # The module cache is a real filesystem cache that outlives a test: a failure marker or the
-        # registry of generated sets from one test must not decide the next one.
-        FaviconService::singleton()->getCache()->clear();
+        # An in-memory pool per test instead of the site's TEMP_PATH pool: a failure marker or the
+        # registry of generated sets from one test must not decide the next one, and the tests
+        # must not touch (or clear) the registry of the site they run in. The Injector is nested
+        # per test, so the real service comes back afterwards.
+        Injector::inst()->registerService(new Psr16Cache(new ArrayAdapter()), CacheInterface::class . '.RestructFavicons');
     }
 }

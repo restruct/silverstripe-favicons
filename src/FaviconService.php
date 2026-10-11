@@ -48,7 +48,7 @@ class FaviconService
      * Bumped whenever the generated output changes for the same input, so browsers and caches that
      * hold a long-lived copy pick up the new rendering, and a new set is generated.
      */
-    public const GENERATOR_VERSION = '2';
+    public const GENERATOR_VERSION = '3';
 
     /**
      * Uniqueness key for Requirements::insertHeadTags(), so the tags are inserted once even when two
@@ -224,8 +224,9 @@ class FaviconService
     private static int $failure_ttl = 600;
 
     /**
-     * Seconds the "being generated" marker of a set lives. Deleted as soon as the build ends; the
-     * TTL only matters when the worker dies during the build (memory or time limit).
+     * Seconds a set's build lock (a file in TEMP_PATH) counts as held. Removed as soon as the build
+     * ends; the TTL only matters when the worker is killed during the build, after which the lock
+     * is taken over.
      *
      * @config
      */
@@ -339,15 +340,17 @@ class FaviconService
         }
         $hash = (string) $file->getHash();
         $origin = $label . ':' . $file->getFilename();
-        # Validation needs only the PNG header, and is remembered per content hash, so a page request
-        # costs one cache read instead of a read from the asset store.
-        $key = 'chk_' . md5($hash);
-        $error = $this->getCache()->get($key);
-        if (!is_string($error)) {
-            $error = (string) $this->checkPng($this->readHead($file));
-            $this->getCache()->set($key, $error);
+        # Only the header's dimensions are remembered per content hash (a page request then costs a
+        # cache read instead of a read from the asset store). The check itself runs on every read,
+        # so a changed max_source_size or locale applies at once.
+        $key = 'dims_' . md5($hash);
+        $dims = $this->getCache()->get($key);
+        if (!is_array($dims) || !array_key_exists('dims', $dims)) {
+            $dims = ['dims' => self::pngDimensions($this->readHead($file))];
+            $this->getCache()->set($key, $dims);
         }
-        return new IconSource($hash, $origin, fn() => (string) $file->getString(), $error === '' ? null : $error);
+        $error = $this->checkDimensions($dims['dims']);
+        return new IconSource($hash, $origin, fn() => (string) $file->getString(), $error);
     }
 
     /**
@@ -434,8 +437,9 @@ class FaviconService
     }
 
     /**
-     * Content hash of a file plus the PNG check, cached on path + mtime + size so a page request
-     * does not re-read the file. Keyed on content rather than mtime so a deploy that rewrites the
+     * Content hash of a file plus its PNG check. The hash and the header's dimensions are cached on
+     * path + mtime + size so a page request does not re-read the file; the check runs against the
+     * current config on every call. Keyed on content rather than mtime so a deploy that rewrites the
      * file unchanged does not bust every visitor's cached icon.
      *
      * @return array{hash:string, error:string} error is '' for a usable file
@@ -446,12 +450,12 @@ class FaviconService
         $key = 'file_' . md5($path . '|' . $stat['mtime'] . '|' . $stat['size']);
         $cache = $this->getCache();
         $info = $cache->get($key);
-        if (!is_array($info) || !isset($info['hash'], $info['error'])) {
+        if (!is_array($info) || !isset($info['hash']) || !array_key_exists('dims', $info)) {
             $head = (string) @file_get_contents($path, false, null, 0, 64);
-            $info = ['hash' => (string) sha1_file($path), 'error' => (string) $this->checkPng($head)];
+            $info = ['hash' => (string) sha1_file($path), 'dims' => self::pngDimensions($head)];
             $cache->set($key, $info);
         }
-        return $info;
+        return ['hash' => $info['hash'], 'error' => (string) $this->checkDimensions($info['dims'])];
     }
 
     /**
@@ -465,7 +469,16 @@ class FaviconService
      */
     public function checkPng(string $bytes): ?string
     {
-        $dims = self::pngDimensions($bytes);
+        return $this->checkDimensions(self::pngDimensions($bytes));
+    }
+
+    /**
+     * checkPng() on dimensions already read from a header (null: not a PNG).
+     *
+     * @param array{0:int, 1:int}|null $dims
+     */
+    public function checkDimensions(?array $dims): ?string
+    {
         if ($dims === null) {
             return _t(__CLASS__ . '.ERROR_NOT_PNG', 'The file is not a PNG image.');
         }
@@ -825,19 +838,17 @@ class FaviconService
         }
 
         # One build per set at a time: concurrent first requests would otherwise each decode the
-        # source (tens of MB each) at once. The marker outlives a worker killed by a fatal error
-        # (memory or time limit) for busy_ttl, so a source that kills the worker is not retried by
-        # every following request either; see also the shutdown handler in buildGuarded().
-        $cache = $this->getCache();
-        $busyKey = $this->busyKey($setId);
-        if ($cache->get($busyKey)) {
+        # source (tens of MB each) at once. A lock FILE rather than a cache entry, because creating
+        # it is atomic (a get-then-set lets two requests both start). A lock left by a worker that
+        # was killed outright is taken over once it is older than busy_ttl; a fatal error is
+        # handled by the shutdown handler in buildGuarded().
+        if (!$this->acquireBuildLock($setId)) {
             return null;
         }
-        $cache->set($busyKey, 1, max(1, (int) $this->config()->get('busy_ttl')));
         try {
             $entry = $this->buildGuarded($source, $setId, is_array($entry) ? $entry : null);
         } finally {
-            $cache->delete($busyKey);
+            $this->releaseBuildLock($setId);
         }
 
         if ($entry === null) {
@@ -877,7 +888,7 @@ class FaviconService
                 if ($this->building && $error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true)) {
                     try {
                         $this->markFailed($this->building);
-                        $this->getCache()->delete($this->busyKey($this->getSetId($this->building)));
+                        $this->releaseBuildLock($this->getSetId($this->building));
                     } catch (Throwable $e) {
                         # Nothing more can be done during shutdown.
                     }
@@ -894,9 +905,56 @@ class FaviconService
         }
     }
 
-    protected function busyKey(string $setId): string
+    /**
+     * Path of the lock file that marks a set as being built (in this server's TEMP_PATH).
+     */
+    public function buildLockPath(string $setId): string
     {
-        return 'busy_' . $setId;
+        return rtrim(TEMP_PATH, '/') . '/favicon-build-' . $setId . '.lock';
+    }
+
+    /**
+     * Whether another process is building this set: its lock exists and is younger than busy_ttl.
+     */
+    public function isBeingBuilt(string $setId): bool
+    {
+        $path = $this->buildLockPath($setId);
+        clearstatcache(true, $path);
+        $mtime = @filemtime($path);
+        return $mtime !== false && time() - $mtime < max(1, (int) $this->config()->get('busy_ttl'));
+    }
+
+    /**
+     * Create the lock atomically (fopen 'x' fails when it exists). A stale lock is first moved
+     * aside with rename(), which only one of several competing processes can win, so a takeover is
+     * atomic too.
+     */
+    protected function acquireBuildLock(string $setId): bool
+    {
+        $path = $this->buildLockPath($setId);
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $handle = @fopen($path, 'x');
+            if ($handle) {
+                fwrite($handle, (string) getmypid());
+                fclose($handle);
+                return true;
+            }
+            if ($this->isBeingBuilt($setId)) {
+                return false;
+            }
+            $stale = $path . '.stale.' . getmypid();
+            if (!@rename($path, $stale)) {
+                # Another process took it over (or released it) first; try once more to create it.
+                continue;
+            }
+            @unlink($stale);
+        }
+        return false;
+    }
+
+    protected function releaseBuildLock(string $setId): void
+    {
+        @unlink($this->buildLockPath($setId));
     }
 
     /**
@@ -928,9 +986,12 @@ class FaviconService
         if ($srcHash === '' || !$store->exists($filename, $srcHash)) {
             # A plain AssetStore file: no File record, so a YAML or theme source never appears in
             # the CMS, and the folder is owned by this module alone.
+            # USE_EXISTING: when another server already stored this set (its libgd may encode the
+            # same image to other bytes), keep that file and take its hash, instead of the servers
+            # overwriting each other's copy and invalidating each other's registry entry.
             $result = $backend->writeToStore($store, $filename, null, null, [
                 'visibility' => AssetStore::VISIBILITY_PUBLIC,
-                'conflict' => AssetStore::CONFLICT_OVERWRITE,
+                'conflict' => AssetStore::CONFLICT_USE_EXISTING,
             ]);
             $srcHash = (string) ($result['Hash'] ?? '');
             if ($srcHash === '') {
@@ -959,9 +1020,10 @@ class FaviconService
             $pngs[$size] = $png;
         }
         $backend->setImageResource(null);
+        # USE_EXISTING for the same reason as icon.png above.
         $ico = $store->setFromString(IcoWriter::build($pngs), $this->setPath($setId, 'favicon.ico'), null, null, [
             'visibility' => AssetStore::VISIBILITY_PUBLIC,
-            'conflict' => AssetStore::CONFLICT_OVERWRITE,
+            'conflict' => AssetStore::CONFLICT_USE_EXISTING,
         ]);
 
         return ['src' => $srcHash, 'ico' => (string) ($ico['Hash'] ?? ''), 'done' => true];
@@ -969,13 +1031,14 @@ class FaviconService
 
     /**
      * The source loaded into a fresh Image_Backend from the Injector, or null when the backend
-     * cannot decode it. The backend reads from a local path, so the bytes go through a temp file
-     * named after their hash (the backend remembers a failed path, which then means this content).
+     * cannot decode it. The backend reads from a local path, so the bytes go through a temp file,
+     * unique per call: a shared name let one process delete the file another was still decoding,
+     * which then looked like an undecodable source.
      */
     protected function decodeSource(IconSource $source): ?Image_Backend
     {
-        $tmp = rtrim(TEMP_PATH, '/') . '/favicon-src-' . $source->getHash() . '.png';
-        if (file_put_contents($tmp, $source->getContents()) === false) {
+        $tmp = tempnam(TEMP_PATH, 'favicon-src-');
+        if ($tmp === false || file_put_contents($tmp, $source->getContents()) === false) {
             return null;
         }
         try {
@@ -1117,7 +1180,7 @@ class FaviconService
             if ($id === $currentId) {
                 continue;
             }
-            if (is_array($entry) && empty($entry['done']) && $this->getCache()->get($this->busyKey($id))) {
+            if (is_array($entry) && empty($entry['done']) && $this->isBeingBuilt($id)) {
                 continue;
             }
             if (is_array($entry)) {

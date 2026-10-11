@@ -5,6 +5,7 @@ namespace Restruct\Favicons\Tests;
 use Restruct\Favicons\FaviconService;
 use Restruct\Favicons\Generator\IcoWriter;
 use Restruct\Favicons\Tests\Stub\FavSpyBackend;
+use Restruct\Favicons\Tests\Stub\FavLockRecordingService;
 use Restruct\Favicons\Tests\Stub\FavStoreDouble;
 use Restruct\Favicons\Tests\Stub\FavThrowingTagsService;
 use SilverStripe\Assets\Dev\TestAssetStore;
@@ -142,6 +143,37 @@ class FaviconServiceTest extends SapphireTest
         $this->assertStringContainsString('at most 2048x2048', (string) $s->checkPng($huge));
         Config::modify()->set(FaviconService::class, 'max_source_size', 0);
         $this->assertNull($s->checkPng($huge), 'max_source_size 0 disables the upper limit');
+    }
+
+    public function testCheckFollowsTheCurrentConfigNotACachedVerdict()
+    {
+        # A header claiming 3000x3000 px: only the header is read for the check
+        $path = TEMP_PATH . '/favicons-test-3000.png';
+        file_put_contents($path, "\x89PNG\r\n\x1a\n" . pack('N', 13) . 'IHDR' . pack('NN', 3000, 3000) . str_repeat("\0", 20));
+        try {
+            Config::modify()->set(FaviconService::class, 'source', $path);
+            $s = $this->service();
+            $this->assertNull($s->getSource(), 'refused at the default max_source_size');
+            $this->assertStringContainsString('at most 2048x2048', (string) $s->getSourceCandidates()[0]->getError());
+
+            # Same file, cache entry already there: raising the limit accepts it at once
+            Config::modify()->set(FaviconService::class, 'max_source_size', 4096);
+            $this->assertNotNull($s->getSource());
+        } finally {
+            @unlink($path);
+        }
+    }
+
+    public function testCheckOfAStoredFileFollowsTheCurrentConfig()
+    {
+        Config::modify()->set(FaviconService::class, 'max_source_size', 600);
+        # Stored before allow_upload is on, so saving does not refuse it
+        $this->makeUpload('icon1024.png');
+        Config::modify()->set(FaviconService::class, 'allow_upload', true);
+        $s = $this->service();
+        $this->assertStringStartsWith('file:', $s->getSource()->getOrigin(), 'the 1024 px upload is refused at 600');
+        Config::modify()->set(FaviconService::class, 'max_source_size', 2048);
+        $this->assertStringStartsWith('upload:', $s->getSource()->getOrigin(), 'and accepted once the limit is raised');
     }
 
     public function testUnusableYamlSourceIsSkippedWithAReason()
@@ -547,7 +579,13 @@ class FaviconServiceTest extends SapphireTest
     {
         # One filesystem pool for CLI and web: CacheFactory would pick a different adapter per SAPI
         # on Silverstripe 5 (PhpFiles with opcache, Filesystem without) and wrap it per stage
-        $this->assertInstanceOf(\Symfony\Component\Cache\Psr16Cache::class, $this->service()->getCache());
+        $spec = Config::inst()->get(Injector::class, 'Psr\\SimpleCache\\CacheInterface.RestructFavicons');
+        $this->assertSame('Symfony\\Component\\Cache\\Psr16Cache', $spec['class'] ?? null, 'the shipped service is a plain pool');
+        $this->assertArrayNotHasKey('factory', $spec);
+        $this->assertSame(
+            'Symfony\\Component\\Cache\\Adapter\\FilesystemAdapter',
+            Config::inst()->get(Injector::class, 'RestructFaviconsCachePool')['class'] ?? null
+        );
 
         # dev/build and the CMS run in Stage, pages in Live, the icon middleware before any reading
         # mode is set: all must see the same registry
@@ -581,21 +619,46 @@ class FaviconServiceTest extends SapphireTest
         $this->assertNotSame($first['id'], $second['id']);
     }
 
-    public function testBusyMarkerPreventsAParallelBuild()
+    public function testBuildLockPreventsAParallelBuild()
     {
         $s = $this->service();
         $source = $s->getSource();
-        $busyKey = 'busy_' . $s->getSetId($source);
-        $s->getCache()->set($busyKey, 1, 60);
-
-        $this->assertNull($s->ensureSet($source), 'another request is building it');
-        $this->assertNull($this->read('icon-192.png'), 'so the probe 404s instead of decoding again');
-        $this->assertFalse($s->hasFailed($source), 'busy is not a failure');
-        $this->assertSame([], $s->getSets());
-
-        $s->getCache()->delete($busyKey);
+        $lock = $s->buildLockPath($s->getSetId($source));
+        # Another request is building this set right now
+        touch($lock);
+        try {
+            $this->assertNull($s->ensureSet($source), 'another request is building it');
+            $this->assertNull($this->read('icon-192.png'), 'so the probe 404s instead of decoding again');
+            $this->assertFalse($s->hasFailed($source), 'busy is not a failure');
+            $this->assertSame([], $s->getSets());
+        } finally {
+            @unlink($lock);
+        }
         $this->assertNotNull($s->ensureSet($source));
-        $this->assertFalse((bool) $s->getCache()->get($busyKey), 'the marker is removed after the build');
+        $this->assertFileDoesNotExist($lock, 'the lock is removed after the build');
+    }
+
+    public function testStaleBuildLockIsTakenOver()
+    {
+        $s = $this->service();
+        $source = $s->getSource();
+        $lock = $s->buildLockPath($s->getSetId($source));
+        # Left by a worker that was killed, longer ago than busy_ttl
+        touch($lock, time() - 200);
+        try {
+            $this->assertNotNull($s->ensureSet($source));
+        } finally {
+            @unlink($lock);
+        }
+    }
+
+    public function testBuildLockIsHeldWhileBuilding()
+    {
+        $s = new FavLockRecordingService();
+        $source = $s->getSource();
+        $this->assertNotNull($s->ensureSet($source));
+        $this->assertSame([true], $s->lockHeldDuringBuild);
+        $this->assertFileDoesNotExist($s->buildLockPath($s->getSetId($source)));
     }
 
     public function testSourceIsDecodedOnceAndShrunkBeforeDrawing()
@@ -640,12 +703,16 @@ class FaviconServiceTest extends SapphireTest
         $s = $this->service();
         # Another request is building a set for another source right now
         $s->getCache()->set('sets', ['otherset00000000' => ['src' => 'x', 'ico' => null, 'done' => false]]);
-        $s->getCache()->set('busy_otherset00000000', 1, 60);
-        $set = $s->ensureSet($s->getSource());
-        $this->assertEqualsCanonicalizing([$set['id'], 'otherset00000000'], array_keys($s->getSets()));
+        $lock = $s->buildLockPath('otherset00000000');
+        touch($lock);
+        try {
+            $set = $s->ensureSet($s->getSource());
+            $this->assertEqualsCanonicalizing([$set['id'], 'otherset00000000'], array_keys($s->getSets()));
+        } finally {
+            @unlink($lock);
+        }
 
-        # Once that request is gone (no marker), its leftover goes, also on the done-set path
-        $s->getCache()->delete('busy_otherset00000000');
+        # Once that request is gone (no lock), its leftover goes, also on the done-set path
         $s->ensureSet($s->getSource());
         $this->assertSame([$set['id']], array_keys($s->getSets()));
     }
