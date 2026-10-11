@@ -218,9 +218,8 @@ works, at three costs:
   are reused: variants that exist are not redrawn);
 - a server shows no icon tags until its first icon request or `dev/build`;
 - servers with different libgd versions may encode `icon.png` differently. The first copy stored
-  is kept (`CONFLICT_USE_EXISTING`) and the others adopt it, so they do not overwrite each other,
-  but a server that built its set before the other one existed keeps its own copy until the set
-  changes.
+  is kept (`CONFLICT_USE_EXISTING`) and the other servers adopt it, so they do not overwrite each
+  other's copy.
 
 The build lock (one build per set at a time) is a file in each server's `TEMP_PATH`, so it only
 coordinates the requests of one server.
