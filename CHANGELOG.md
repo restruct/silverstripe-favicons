@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (planned 1.1.0)
+## 1.1.0 (2026-10-12)
 
 ### Changed
 
