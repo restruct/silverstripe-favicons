@@ -10,7 +10,8 @@ not a generic one) and the login pages.
 Browsers and home-screen shortcuts probe fixed root paths whether or not a page links them:
 `/favicon.ico`, `/apple-touch-icon.png`, `/apple-touch-icon-precomposed.png`,
 `/apple-touch-icon-152x152.png`, `/manifest.json` and more. Without a file there, each probe is a
-404 that runs the full Silverstripe stack. This module answers all of them from one PNG.
+404 that runs the full Silverstripe stack. This module answers all of them from one PNG, and
+outside dev mode also writes them into the webroot, so the web server serves them without PHP.
 
 ## Requirements
 
@@ -45,18 +46,26 @@ Restruct\Favicons\FaviconService:
 `Favicons: Serving all favicon variants from file:themes/mytheme/images/icon.png.` The line is red
 when a source is set but cannot be used, with the reason.
 
-### Remove physical icon files from the webroot
+### Existing icon files in the webroot
 
-The web server serves an existing file before Silverstripe runs. A `public/favicon.ico`,
-`public/apple-touch-icon.png` or `public/site.webmanifest` therefore **wins over this module** for
-that path, and keeps serving the old icon. Delete them (some project skeletons ship a
-`public/favicon.ico`).
+The web server serves an existing file before Silverstripe runs, so a `public/favicon.ico`,
+`public/apple-touch-icon.png` or `public/site.webmanifest` the project ships (some skeletons have a
+`public/favicon.ico`) would keep serving the old icon. Where the module writes its own files into
+the webroot (see [Files in the webroot](#files-in-the-webroot)), `dev/build` renames such a file
+in place, eg to `favicon.bu-20261012.ico`, writes its own, and says so in its output: **remove the
+original from the project** (its repository), or the next deploy brings it back. A file that is
+byte-identical to the module's is simply kept. Each path is backed up only once: from then on the
+file there is the module's, and it is overwritten without another backup.
+
+Where the module does not write (dev mode, `write_public_files: false`, a webroot it cannot write,
+the other servers of a multi-server setup) those files still win: delete them yourself.
 
 **nginx:** some stock vhosts (Laravel Forge among them) contain an exact-match block such as
-`location = /favicon.ico { access_log off; log_not_found off; }` without a `try_files`. nginx then
-answers `/favicon.ico` itself with a 404 once the file is gone, and with a server-level
-`error_page 404 /index.php` the icon body arrives with status 404. Pass the request on to
-Silverstripe in that block:
+`location = /favicon.ico { access_log off; log_not_found off; }` without a `try_files`. With the
+module's file in the webroot that block serves it as it is. Only where the module does not write
+the file (see above) does nginx answer `/favicon.ico` itself with a 404, and with a server-level
+`error_page 404 /index.php` the icon body then arrives with status 404. For those setups, pass the
+request on to Silverstripe in that block:
 
 ```nginx
 location = /favicon.ico { access_log off; log_not_found off; try_files $uri /index.php?$query_string; }
@@ -244,7 +253,11 @@ is a new folder.
 
 **When a set is generated:** on `dev/build`, when the icon changes in Settings (on save and
 publish), and otherwise by the first icon request (`/favicon.ico` and the like, which browsers send
-on their own). **Never during a page render**: until a set is complete, pages carry no icon tags,
+on their own). Only a set that does not exist yet is drawn: `dev/build` with an unchanged icon and
+config finds the set in the registry and resamples nothing, and it leaves the
+[files in the webroot](#files-in-the-webroot) alone too: a file there is only written when it is
+missing, comes from an older set, or was replaced since, so an unchanged build reads, hashes and
+writes none of them. A new icon (or config) is a new set, which rewrites each file once. **Never during a page render**: until a set is complete, pages carry no icon tags,
 and an error in the tag code is logged and leaves the tags out rather than breaking the page. One
 build per set runs at a time (a "busy" marker, `busy_ttl`): concurrent first requests get a 404
 instead of each decoding the source. A source the backend cannot decode, or whose decode kills the
@@ -324,6 +337,53 @@ non-square source never decodes to more than a square one at the same limit.
   requests (order listed from a booted SS5 and SS6 install).
 - A 304 carries the variant's `Content-Type` too (not required, but some proxies key on it).
 
+### Files in the webroot
+
+Outside dev mode, `dev/build` and a Settings save that changes the icon (or the site title, which
+the manifest carries) also write every root path above into the webroot (`public/`): `favicon.ico`,
+`apple-touch-icon.png`, `apple-touch-icon-precomposed.png`, the `apple-touch-icon-NxN.png` sizes in
+`touch_sizes`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `site.webmanifest`,
+`manifest.json`, and `extra_paths` aliases that are a plain file name at the root. The web server
+then answers those probes itself; the PHP route stays as the fallback, and still answers every
+other `apple-touch-icon-NxN[-precomposed].png` name, nested aliases (eg `sites/favicon.ico`: a
+folder in the webroot could shadow a page URL), and anything the module could not write. Normal
+page requests never write.
+
+`dev/build` prints what it did, eg `Favicons: Icon files in the webroot (/srv/site/public): wrote
+favicon.ico, ...` or `12 up to date`, plus any rename (see
+[Existing icon files](#existing-icon-files-in-the-webroot)) and, in red, any file it had to skip.
+
+- **Which files are the module's** is kept in the module cache (per webroot: the set each file came
+  from, and its size, mtime and inode), the same cache as the registry of generated sets. That is
+  how an unchanged `dev/build` touches nothing, and how a new icon replaces the old files without
+  backing them up. If the cache is cleared, an existing file that differs from the new one is
+  treated as foreign once (one backup), never lost.
+- **Stale files are removed:** when the source goes away or cannot be decoded, a path is added to
+  `disabled_paths`, the manifest is switched off, or the feature itself is switched off (or the
+  site is put in dev mode), the files the module wrote are deleted, so an old icon is never served
+  ahead of the route. A file that was changed since the module wrote it is left alone.
+- **Not writable:** when the webroot is not writable for the user running `dev/build` (or the web
+  server, for a Settings save), nothing is written and `dev/build` says so in one line; the route
+  answers as before.
+- **Dev mode:** nothing is written, because a local webroot is usually a git working tree, where
+  the files and a renamed `favicon.ico` would show up as changes. Set
+  `write_public_files_in_dev: true` to write there too. `write_public_files: false` switches the
+  feature off everywhere (files written earlier are then removed on the next `dev/build`).
+- **Deploys:** the files are not in your repository; ignore them there if your deploy pulls into a
+  working tree (eg `public/favicon.ico`, `public/apple-touch-icon*.png`, `public/icon-*.png`,
+  `public/site.webmanifest`, `public/manifest.json`, `public/*.bu-*`). With zero-downtime deploys
+  each release has its own `public/` and `dev/build` runs in it, so each release gets its files
+  before it goes live.
+- **Several web servers:** only the server that runs `dev/build` (or handles the Settings save)
+  gets the files; the others answer through the route. A later icon change saved through another
+  server leaves the first server's files stale until its next `dev/build`. Unless every server runs
+  `dev/build` on each change, or `public/` is shared, set `write_public_files: false` there.
+- **Content type:** the web server picks it from the extension. `.webmanifest` should be
+  `application/manifest+json` (nginx's stock `mime.types` has it; add it to older Apache setups),
+  and the files get the web server's own cache headers instead of the module's.
+- **Subdirectory installs:** the manifest's `start_url` and icon URLs come from the base URL; set
+  `SS_BASE_URL` so `dev/build` on the command line writes the right ones.
+
 ## Configuration reference
 
 All on `Restruct\Favicons\FaviconService`.
@@ -353,6 +413,8 @@ All on `Restruct\Favicons\FaviconService`.
 | `versioned_max_age` | `31536000` | Cache lifetime for a `?v=` URL, seconds (sent with `immutable`) |
 | `failure_ttl` | `600` | Seconds an undecodable source (or one that killed the worker) is remembered (variants withdrawn, not retried) |
 | `asset_folder` | `'_favicons'` | AssetStore folder for the generated sets |
+| `write_public_files` | `true` | Also write the root-path files into the webroot, see [Files in the webroot](#files-in-the-webroot) |
+| `write_public_files_in_dev` | `false` | Write them in dev mode too |
 
 `manifest_fields` defaults: `name` and `short_name` empty (both fall back to the SiteConfig
 title), `start_url` empty (the site's base URL, so a subdirectory install works), `display:

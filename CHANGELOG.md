@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 (Unreleased)
+
+### Added
+
+- The root-path files (`favicon.ico`, `apple-touch-icon*.png`, `icon-*.png`, `site.webmanifest`,
+  `manifest.json`, root-level `extra_paths` aliases, minus `disabled_paths`) are also written into
+  the public webroot on `dev/build` and on a Settings save, so the web server serves them without
+  PHP; the existing route stays as the fallback. Only a missing file, one from an older set or one
+  replaced since is written: an unchanged `dev/build` reads and writes nothing. Skipped when the
+  webroot is not writable (one `dev/build` line) and in dev mode; `write_public_files` and
+  `write_public_files_in_dev` switch it. A foreign file in the way is renamed once in place (eg
+  `favicon.bu-20261012.ico`) unless it is identical; files the module wrote are removed again when
+  they are no longer answered (source removed, `disabled_paths`, feature off). `dev/build` prints
+  what was written, renamed or removed.
+
+### Changed
+
+- README: "Remove physical icon files from the webroot" and the nginx note now describe the
+  fallback cases only.
+
 ## 1.1.0 (2026-10-12)
 
 ### Changed
