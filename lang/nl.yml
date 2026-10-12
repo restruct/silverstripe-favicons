@@ -1,7 +1,6 @@
 nl:
   Restruct\Favicons\FaviconService:
     ERROR_NOT_PNG: 'Het bestand is geen PNG-afbeelding.'
-    ERROR_NOT_SQUARE: 'De afbeelding is {w}x{h} px; die moet vierkant zijn.'
     ERROR_TOO_SMALL: 'De afbeelding is {w}x{h} px; die moet minstens {min}x{min} px zijn.'
     ERROR_TOO_LARGE: 'De afbeelding is {w}x{h} px; die mag hoogstens {max}x{max} px zijn.'
     STATUS_SKIPPED: '{origin} overgeslagen: {error}'
@@ -11,4 +10,4 @@ nl:
     STATUS_OK: 'Alle favicon-varianten worden geserveerd vanuit {origin}.'
   Restruct\Favicons\Extensions\SiteConfigFaviconExtension:
     FaviconSource: 'Site-icoon (favicon)'
-    UPLOAD_HINT: 'PNG, vierkant, minstens {min}x{min} px, bij voorkeur met transparante achtergrond. Gaat voor op het icoon uit de siteconfiguratie.'
+    UPLOAD_HINT: 'PNG, minstens {min}x{min} px, bij voorkeur vierkant en met transparante achtergrond; een niet-vierkante afbeelding wordt bijgesneden tot het middelste vierkant. Gaat voor op het icoon uit de siteconfiguratie.'

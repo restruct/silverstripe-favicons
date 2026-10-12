@@ -1,6 +1,6 @@
 {
     "name": "restruct/silverstripe-favicons",
-    "description": "One square PNG to every favicon, touch icon and web manifest variant browsers ask for, served at the paths they probe, on the frontend, in the CMS and on the login pages",
+    "description": "One PNG to every favicon, touch icon and web manifest variant browsers ask for, served at the paths they probe, on the frontend, in the CMS and on the login pages",
     "type": "silverstripe-vendormodule",
     "keywords": [
         "silverstripe",

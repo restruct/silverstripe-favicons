@@ -119,6 +119,25 @@ class FaviconMiddlewareTest extends FunctionalTest
         $this->assertSame('image/x-icon', $response->getHeader('Content-Type'));
     }
 
+    public function testDisabledPathsArePassedOn()
+    {
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['manifest.json']);
+        $this->assertSame(404, $this->get('manifest.json')->getStatusCode(), 'handed back: the CMS 404s it');
+        $this->assertSame(200, $this->get('site.webmanifest')->getStatusCode(), 'only the listed path');
+
+        # Case-insensitive, leading slash ignored
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['/Favicon.ICO']);
+        $this->assertSame(404, $this->get('favicon.ico')->getStatusCode());
+        $this->assertSame(200, $this->get('apple-touch-icon.png')->getStatusCode());
+
+        # An extra_paths alias still answers when its target is disabled, and not when it is listed
+        Config::modify()->set(FaviconService::class, 'extra_paths', ['sites/favicon.ico' => 'favicon.ico']);
+        $this->assertSame(200, $this->get('sites/favicon.ico')->getStatusCode(), 'alias to a disabled path');
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['sites/favicon.ico']);
+        $this->assertSame(404, $this->get('sites/favicon.ico')->getStatusCode(), 'disabled alias');
+        $this->assertSame(200, $this->get('favicon.ico')->getStatusCode());
+    }
+
     public function testNothingIsServedWithoutASource()
     {
         Config::modify()->set(FaviconService::class, 'source', null);

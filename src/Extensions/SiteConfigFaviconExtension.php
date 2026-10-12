@@ -51,7 +51,7 @@ class SiteConfigFaviconExtension extends Extension
 
         $hint = _t(
             __CLASS__ . '.UPLOAD_HINT',
-            'PNG, square, at least {min}x{min} px, preferably with a transparent background. Overrides the icon set in the site configuration.',
+            'PNG, at least {min}x{min} px, preferably square and with a transparent background; a non-square image is cropped to its centre square. Overrides the icon set in the site configuration.',
             ['min' => FaviconService::MIN_SOURCE_SIZE]
         );
 
@@ -64,7 +64,8 @@ class SiteConfigFaviconExtension extends Extension
             ->setAttachEnabled(false)
             # The description is rendered as HTML, and the status names the uploaded file.
             ->setDescription(htmlspecialchars($hint . ' ' . $service->getStatusMessage(), ENT_QUOTES));
-        # Square PNG of at least 512 px, checked at upload time on top of the field's own checks.
+        # PNG of at least 512 px on its shortest side (and within max_source_size), checked at upload
+        # time on top of the field's own checks.
         $upload = $field->getUpload();
         if (!$upload->getValidator() instanceof IconUploadValidator) {
             $upload->setValidator(new IconUploadValidator($upload->getValidator()));

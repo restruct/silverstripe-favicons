@@ -15,6 +15,7 @@ use SilverStripe\Assets\Storage\AssetStore;
 use SilverStripe\Assets\Storage\DBFile;
 use SilverStripe\Control\Director;
 use SilverStripe\Core\Config\Configurable;
+use SilverStripe\Core\Extensible;
 use SilverStripe\Core\Injector\Injectable;
 use SilverStripe\Core\Injector\Injector;
 use SilverStripe\Core\Manifest\ModuleResourceLoader;
@@ -31,7 +32,8 @@ use Throwable;
  *   1. the CMS upload on Settings (SiteConfig.FaviconSource), only with allow_upload: true
  *   2. admintweaks' SiteConfig.FavIcon, when that module is installed and use_admintweaks is on
  *   3. the YAML `source`
- * Every source must be a square PNG of at least MIN_SOURCE_SIZE px.
+ * Every source must be a PNG whose shortest side is at least MIN_SOURCE_SIZE px; a non-square one is
+ * centre-cropped to a square when its set is generated.
  *
  * Generated files live in the AssetStore (so S3 and other adapters work), under
  * `_favicons/<set id>/`: a public copy of the source as icon.png, its PNG variants as asset variants
@@ -43,6 +45,8 @@ class FaviconService
 {
     use Injectable;
     use Configurable;
+    # Extensible for the updateManifestData hook in getManifestData().
+    use Extensible;
 
     /**
      * Bumped whenever the generated output changes for the same input, so browsers and caches that
@@ -65,7 +69,8 @@ class FaviconService
     /**
      * The icon as a resource string, resolved through ModuleResourceLoader: "vendor/module:path/icon.png",
      * or a path relative to the project root such as "app/images/icon.png" or
-     * "themes/mytheme/images/icon.png". A square PNG of at least 512x512 px.
+     * "themes/mytheme/images/icon.png". A PNG of at least 512x512 px; a non-square one is
+     * centre-cropped to a square.
      *
      * This is one fixed file, not looked up through the theme stack: when the site switches theme,
      * point `source` at the new theme's icon.
@@ -185,6 +190,23 @@ class FaviconService
      * @config
      */
     private static array $extra_paths = [];
+
+    /**
+     * Request paths this module must NOT answer, so a project can hand them back to its own route,
+     * eg ['manifest.json'] or ['site.webmanifest', 'manifest.json']. Exact paths relative to the
+     * site base, case-insensitive, no patterns: 'apple-touch-icon.png' does not also disable
+     * 'apple-touch-icon-precomposed.png'.
+     *
+     * A disabled path is passed on by the middleware, and nothing this module emits points at it:
+     * its <link> tag (favicon.ico, apple-touch-icon.png, site.webmanifest) or its manifest icon entry
+     * (icon-192.png, icon-512.png, icon-maskable-512.png) is left out. Disabling only manifest.json
+     * just drops that alias. `manifest: false` still switches the whole manifest off; this list is the
+     * per-path version of it. An `extra_paths` alias is a request path like any other: listing the
+     * alias disables it, while disabling its target does not (the alias was configured on purpose).
+     *
+     * @config
+     */
+    private static array $disabled_paths = [];
 
     /**
      * Where the <link> tags are added.
@@ -459,13 +481,16 @@ class FaviconService
     }
 
     /**
-     * Why these bytes are not a usable icon source, or null when they are: a PNG, square, at least
-     * MIN_SOURCE_SIZE and at most max_source_size px. Reads only the header, so the first 24 bytes
-     * are enough.
+     * Why these bytes are not a usable icon source, or null when they are: a PNG whose shortest side
+     * is at least MIN_SOURCE_SIZE and whose longest side is at most max_source_size px. Reads only
+     * the header, so the first 24 bytes are enough.
      *
-     * Non-square sources are refused rather than padded: padding would put the icon off-centre in
-     * some variants and invent a background colour for the margin, and the person uploading it is
-     * better placed to decide how it should be cropped.
+     * A non-square source is accepted and centre-cropped to a square of its shortest side when the
+     * set is generated (see buildSet()), which is what online favicon generators do. It is cropped
+     * rather than padded: padding would invent a background colour for the margin and put the icon
+     * off-centre in some variants. The shortest side is the one that must reach MIN_SOURCE_SIZE,
+     * because that is the edge of the cropped square; the longest side is the one the decode cost
+     * (max_source_size) has to bound, because the whole image is decoded before it is cropped.
      */
     public function checkPng(string $bytes): ?string
     {
@@ -483,14 +508,9 @@ class FaviconService
             return _t(__CLASS__ . '.ERROR_NOT_PNG', 'The file is not a PNG image.');
         }
         [$w, $h] = $dims;
-        if ($w !== $h) {
-            return _t(
-                __CLASS__ . '.ERROR_NOT_SQUARE',
-                'The image is {w}x{h} px; it must be square.',
-                ['w' => $w, 'h' => $h]
-            );
-        }
-        if ($w < self::MIN_SOURCE_SIZE) {
+        # "at least {min}x{min}" and "at most {max}x{max}" read as bounds on both sides, which is
+        # the same as bounding the shortest and the longest side, so the messages need no change.
+        if (min($w, $h) < self::MIN_SOURCE_SIZE) {
             return _t(
                 __CLASS__ . '.ERROR_TOO_SMALL',
                 'The image is {w}x{h} px; it must be at least {min}x{min} px.',
@@ -498,7 +518,7 @@ class FaviconService
             );
         }
         $max = (int) $this->config()->get('max_source_size');
-        if ($max > 0 && $w > $max) {
+        if ($max > 0 && max($w, $h) > $max) {
             return _t(
                 __CLASS__ . '.ERROR_TOO_LARGE',
                 'The image is {w}x{h} px; it must be at most {max}x{max} px.',
@@ -656,13 +676,19 @@ class FaviconService
      * answers it, or null when this module does not serve that path.
      *
      * Covers the standard names, /manifest.json, every apple-touch-icon[-NxN][-precomposed].png
-     * probe (nearest generated size), and `extra_paths`. Whether the variant can actually be produced
-     * for the current source is checked when serving.
+     * probe (nearest generated size), and `extra_paths`, minus `disabled_paths`. Whether the variant
+     * can actually be produced for the current source is checked when serving.
      */
     public function resolveRequestPath(string $path): ?string
     {
         $path = ltrim($path, '/');
         $lower = strtolower($path);
+
+        # Checked on the request path before any mapping, so it applies to aliases and probe
+        # patterns alike, and a project route behind the middleware gets the request.
+        if ($this->isPathDisabled($lower)) {
+            return null;
+        }
 
         $extra = (array) $this->config()->get('extra_paths');
         foreach ($extra as $from => $to) {
@@ -675,6 +701,20 @@ class FaviconService
         }
 
         return $this->resolveBuiltinPath($lower);
+    }
+
+    /**
+     * Whether a request path is listed in `disabled_paths` (case-insensitive, leading slash ignored).
+     */
+    public function isPathDisabled(string $path): bool
+    {
+        $path = strtolower(ltrim($path, '/'));
+        foreach ((array) $this->config()->get('disabled_paths') as $disabled) {
+            if (is_string($disabled) && strtolower(ltrim(trim($disabled), '/')) === $path) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -965,6 +1005,11 @@ class FaviconService
      * stored as icon.png is that shrunk image as the backend encodes it, not the uploaded bytes, so
      * metadata chunks in the original (text, EXIF, colour profiles) are not published.
      *
+     * A non-square source is first centre-cropped to a square through the backend's own
+     * croppedResize() (what the Fill() image manipulation uses), in the same step as the shrink, so
+     * icon.png and every variant are drawn from the same square and no image library other than the
+     * project's Image_Backend is involved.
+     *
      * @param array<string, mixed>|null $previous An incomplete registry entry for this set
      * @return array{src:string, ico:?string, done:bool}|null
      */
@@ -974,6 +1019,13 @@ class FaviconService
         $filename = $this->setPath($setId, 'icon.png');
 
         $backend = $this->decodeSource($source);
+        if ($backend && $backend->getWidth() !== $backend->getHeight()) {
+            # Centre crop to a square of the shortest side, scaled down to the largest variant edge
+            # in the same call (never up: the shortest side is at least MIN_SOURCE_SIZE). The backend
+            # returns a clone; the full-size decode is released when $backend is reassigned.
+            $edge = min($backend->getWidth(), $backend->getHeight(), $this->getLargestVariantSize());
+            $backend = $backend->croppedResize($edge, $edge);
+        }
         $master = $backend ? $backend->getImageResource() : null;
         if (!$master) {
             return null;
@@ -1286,8 +1338,18 @@ class FaviconService
             $icons[] = ['src' => $base . '/icon-192.png', 'sizes' => '192x192', 'type' => 'image/png'];
             $icons[] = ['src' => $base . '/icon-512.png', 'sizes' => '512x512', 'type' => 'image/png'];
             $icons[] = ['src' => $base . '/icon-maskable-512.png', 'sizes' => '512x512', 'type' => 'image/png', 'purpose' => 'maskable'];
+            # An icon at a disabled path is not answered by this module, so it is not listed either.
+            $icons = array_values(array_filter(
+                $icons,
+                fn($icon) => !$this->isPathDisabled(substr($icon['src'], strlen($base) + 1))
+            ));
         }
         $fields['icons'] = $icons;
+
+        # Projects can add or change members here (eg `id`, `scope`, `screenshots`, or icons of
+        # their own). Before the empty-member filter, so setting a member to null removes it. The
+        # result is part of getVersion(), so a change also changes the ?v= cache-buster.
+        $this->extend('updateManifestData', $fields, $source);
 
         # Drop empty members rather than emitting nulls, which some validators flag.
         return array_filter($fields, fn($v) => $v !== null && $v !== '' && $v !== []);
@@ -1344,13 +1406,15 @@ class FaviconService
         $url = fn(string $name) => htmlspecialchars($base . '/' . $name . '?v=' . $v, ENT_QUOTES);
 
         $tags = [];
-        if (isset($variants['favicon.ico'])) {
+        # A path in disabled_paths is not answered here, so it is not linked either.
+        $linked = fn(string $name) => isset($variants[$name]) && !$this->isPathDisabled($name);
+        if ($linked('favicon.ico')) {
             $tags[] = '<link rel="icon" href="' . $url('favicon.ico') . '" sizes="32x32">';
         }
-        if (isset($variants['apple-touch-icon.png'])) {
+        if ($linked('apple-touch-icon.png')) {
             $tags[] = '<link rel="apple-touch-icon" href="' . $url('apple-touch-icon.png') . '">';
         }
-        if (isset($variants['site.webmanifest'])) {
+        if ($linked('site.webmanifest')) {
             $tags[] = '<link rel="manifest" href="' . $url('site.webmanifest') . '">';
         }
         $theme = (string) $this->getThemeColor();
