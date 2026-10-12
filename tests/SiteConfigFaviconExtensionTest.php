@@ -113,7 +113,8 @@ class SiteConfigFaviconExtensionTest extends SapphireTest
         $this->assertTrue($upload->validate($this->tmpFile('icon.png')), implode(' ', $upload->getErrors()));
 
         # fake.png is refused by silverstripe/mimevalidator first when installed, by the PNG check otherwise
-        foreach (['small.png' => 'at least 512x512', 'wide.png' => 'must be square', 'fake.png' => ''] as $fixture => $reason) {
+        # wide.png is 600x300: refused for its short side, no longer for not being square
+        foreach (['small.png' => 'at least 512x512', 'wide.png' => '600x300 px; it must be at least 512x512', 'fake.png' => ''] as $fixture => $reason) {
             $upload->clearErrors();
             $validator->clearErrors();
             $this->assertFalse($upload->validate($this->tmpFile($fixture)), $fixture);

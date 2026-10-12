@@ -124,7 +124,7 @@ class FaviconServiceTest extends SapphireTest
         $this->assertSame('', $this->service()->getHeadTags());
     }
 
-    public function testOnlySquarePngsOfAtLeast512AreAccepted()
+    public function testOnlyPngsOfAtLeast512AreAccepted()
     {
         $s = $this->service();
         $this->assertNull($s->checkPng((string) file_get_contents($this->fixture('icon.png'))));
@@ -136,8 +136,10 @@ class FaviconServiceTest extends SapphireTest
             '64x64 px; it must be at least 512x512',
             (string) $s->checkPng((string) file_get_contents($this->fixture('small.png')))
         );
+        # Non-square is no longer refused as such (it is centre-cropped); 600x300 is refused for
+        # its 300 px short side
         $this->assertStringContainsString(
-            '600x300 px; it must be square',
+            '600x300 px; it must be at least 512x512',
             (string) $s->checkPng((string) file_get_contents($this->fixture('wide.png')))
         );
         # Only the header is read, so a header claiming 5000 px is enough to test the upper limit
@@ -180,7 +182,8 @@ class FaviconServiceTest extends SapphireTest
 
     public function testUnusableYamlSourceIsSkippedWithAReason()
     {
-        foreach (['fake.png' => 'not a PNG', 'small.png' => 'at least 512x512', 'wide.png' => 'must be square'] as $fixture => $reason) {
+        # wide.png is 600x300: refused for its short side, no longer for not being square
+        foreach (['fake.png' => 'not a PNG', 'small.png' => 'at least 512x512', 'wide.png' => '600x300 px; it must be at least 512x512'] as $fixture => $reason) {
             Config::modify()->set(FaviconService::class, 'source', $this->fixture($fixture));
             $s = $this->service();
             $this->assertNull($s->getSource(), $fixture);
