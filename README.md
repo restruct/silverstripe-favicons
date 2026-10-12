@@ -52,6 +52,18 @@ The web server serves an existing file before Silverstripe runs. A `public/favic
 that path, and keeps serving the old icon. Delete them (some project skeletons ship a
 `public/favicon.ico`).
 
+**nginx:** some stock vhosts (Laravel Forge among them) contain an exact-match block such as
+`location = /favicon.ico { access_log off; log_not_found off; }` without a `try_files`. nginx then
+answers `/favicon.ico` itself with a 404 once the file is gone, and with a server-level
+`error_page 404 /index.php` the icon body arrives with status 404. Pass the request on to
+Silverstripe in that block:
+
+```nginx
+location = /favicon.ico { access_log off; log_not_found off; try_files $uri /index.php?$query_string; }
+```
+
+Do the same for any similar block (e.g. `location = /apple-touch-icon.png`), or remove it.
+
 ### Remove icon tags from your theme
 
 The module adds its `<link>` tags to every page without template changes. If your theme's
