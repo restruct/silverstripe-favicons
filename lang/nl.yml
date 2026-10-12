@@ -11,3 +11,11 @@ nl:
   Restruct\Favicons\Extensions\SiteConfigFaviconExtension:
     FaviconSource: 'Site-icoon (favicon)'
     UPLOAD_HINT: 'PNG, minstens {min}x{min} px, bij voorkeur vierkant en met transparante achtergrond; een niet-vierkante afbeelding wordt bijgesneden tot het middelste vierkant. Gaat voor op het icoon uit de siteconfiguratie.'
+  Restruct\Favicons\PublicFileWriter:
+    UNWRITABLE: 'De webroot ({folder}) is niet schrijfbaar, dus daar worden geen icoonbestanden geschreven; de iconen worden via PHP geserveerd.'
+    WROTE: '{files} geschreven'
+    REMOVED: '{files} verwijderd'
+    CURRENT: '{count} actueel'
+    FAILED: '{file} overgeslagen ({reason}, geserveerd via PHP)'
+    RENAMED: 'bestaande {file} hernoemd naar {backup}: verwijder {file} uit het project (bijv. de repository), deze module schrijft het nu'
+    SUMMARY: 'Icoonbestanden in de webroot ({folder}): {parts}.'

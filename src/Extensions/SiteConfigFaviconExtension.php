@@ -6,12 +6,14 @@ namespace Restruct\Favicons\Extensions;
 
 use Restruct\Favicons\FaviconService;
 use Restruct\Favicons\Forms\IconUploadValidator;
+use Restruct\Favicons\PublicFileWriter;
 use SilverStripe\AssetAdmin\Forms\UploadField;
 use SilverStripe\Assets\File;
 use SilverStripe\Assets\Image;
 use SilverStripe\Core\Extension;
 use SilverStripe\Forms\FieldList;
 use SilverStripe\ORM\DB;
+use Throwable;
 
 /**
  * Optional CMS upload for the icon on Settings, shown only with
@@ -152,6 +154,15 @@ class SiteConfigFaviconExtension extends Extension
         if ($owner->isChanged('FaviconSourceID') || ($owner->hasField('FavIconID') && $owner->isChanged('FavIconID'))) {
             FaviconService::singleton()->warmUp();
         }
+        # On every Settings save, not only an icon change: the manifest carries the site title and
+        # theme colour. A cache read when nothing that is written changed.
+        # Not on the write that creates the record: current_site_config() creates it when there is
+        # none, and get_one() has cached that "none" for this request, so the manifest's own
+        # current_site_config() call would create another one, and so on (seen in the tests). The
+        # dev/build sync after the default record covers a new site.
+        if (!$owner->isChanged('ID')) {
+            $this->syncPublicFiles();
+        }
     }
 
     /**
@@ -162,6 +173,22 @@ class SiteConfigFaviconExtension extends Extension
     protected function onAfterPublishRecursive(): void
     {
         FaviconService::singleton()->warmUp();
+        $this->syncPublicFiles();
+    }
+
+    /**
+     * Update the copies in the webroot (see PublicFileWriter). Never throws: a Settings save or a
+     * dev/build must not fail because the webroot cannot be written.
+     *
+     * @return array<string, mixed>|null The sync result, null when it failed outright
+     */
+    protected function syncPublicFiles(): ?array
+    {
+        try {
+            return PublicFileWriter::singleton()->sync();
+        } catch (Throwable $e) {
+            return null;
+        }
     }
 
     /**
@@ -177,5 +204,15 @@ class SiteConfigFaviconExtension extends Extension
         # Red only for a source that is set but not (fully) used; "nothing configured yet" is a
         # normal state right after installing.
         DB::alteration_message('Favicons: ' . $message, $service->isDegraded() ? 'error' : 'notice');
+
+        # Then the copies in the webroot: only a missing file, one from an older set or one replaced
+        # since is written, so an unchanged dev/build reads and writes nothing. A second line only
+        # when there is something to say.
+        $result = $this->syncPublicFiles();
+        $line = $result ? PublicFileWriter::singleton()->describe($result) : null;
+        if ($line !== null) {
+            $type = $result['failed'] ? 'error' : ($result['renamed'] || $result['removed'] ? 'changed' : 'notice');
+            DB::alteration_message('Favicons: ' . $line, $type);
+        }
     }
 }

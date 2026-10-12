@@ -29,6 +29,11 @@ use SilverStripe\Core\Injector\Injectable;
  *
  * A physical file in the webroot (public/favicon.ico) is served by the web server before
  * Silverstripe runs at all, and wins over this middleware.
+ *
+ * PublicFileWriter uses exactly that: outside dev mode it writes these files into the webroot on
+ * dev/build, so the web server answers them, and this middleware is the fallback for a webroot it
+ * cannot write, for probes that are not a file (any other apple-touch-icon-NxN), and for other
+ * servers in a multi-server setup.
  */
 class FaviconMiddleware implements HTTPMiddleware
 {
