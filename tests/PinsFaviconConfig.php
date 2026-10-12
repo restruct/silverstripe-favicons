@@ -41,6 +41,7 @@ trait PinsFaviconConfig
             ],
             'theme_color' => null,
             'extra_paths' => [],
+            'disabled_paths' => [],
             'frontend_tags' => true,
             'admin_tags' => true,
             'security_tags' => true,

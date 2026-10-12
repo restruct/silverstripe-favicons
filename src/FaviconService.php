@@ -192,6 +192,23 @@ class FaviconService
     private static array $extra_paths = [];
 
     /**
+     * Request paths this module must NOT answer, so a project can hand them back to its own route,
+     * eg ['manifest.json'] or ['site.webmanifest', 'manifest.json']. Exact paths relative to the
+     * site base, case-insensitive, no patterns: 'apple-touch-icon.png' does not also disable
+     * 'apple-touch-icon-precomposed.png'.
+     *
+     * A disabled path is passed on by the middleware, and nothing this module emits points at it:
+     * its <link> tag (favicon.ico, apple-touch-icon.png, site.webmanifest) or its manifest icon entry
+     * (icon-192.png, icon-512.png, icon-maskable-512.png) is left out. Disabling only manifest.json
+     * just drops that alias. `manifest: false` still switches the whole manifest off; this list is the
+     * per-path version of it. An `extra_paths` alias is a request path like any other: listing the
+     * alias disables it, while disabling its target does not (the alias was configured on purpose).
+     *
+     * @config
+     */
+    private static array $disabled_paths = [];
+
+    /**
      * Where the <link> tags are added.
      *
      * @config
@@ -659,13 +676,19 @@ class FaviconService
      * answers it, or null when this module does not serve that path.
      *
      * Covers the standard names, /manifest.json, every apple-touch-icon[-NxN][-precomposed].png
-     * probe (nearest generated size), and `extra_paths`. Whether the variant can actually be produced
-     * for the current source is checked when serving.
+     * probe (nearest generated size), and `extra_paths`, minus `disabled_paths`. Whether the variant
+     * can actually be produced for the current source is checked when serving.
      */
     public function resolveRequestPath(string $path): ?string
     {
         $path = ltrim($path, '/');
         $lower = strtolower($path);
+
+        # Checked on the request path before any mapping, so it applies to aliases and probe
+        # patterns alike, and a project route behind the middleware gets the request.
+        if ($this->isPathDisabled($lower)) {
+            return null;
+        }
 
         $extra = (array) $this->config()->get('extra_paths');
         foreach ($extra as $from => $to) {
@@ -678,6 +701,20 @@ class FaviconService
         }
 
         return $this->resolveBuiltinPath($lower);
+    }
+
+    /**
+     * Whether a request path is listed in `disabled_paths` (case-insensitive, leading slash ignored).
+     */
+    public function isPathDisabled(string $path): bool
+    {
+        $path = strtolower(ltrim($path, '/'));
+        foreach ((array) $this->config()->get('disabled_paths') as $disabled) {
+            if (is_string($disabled) && strtolower(ltrim(trim($disabled), '/')) === $path) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1301,6 +1338,11 @@ class FaviconService
             $icons[] = ['src' => $base . '/icon-192.png', 'sizes' => '192x192', 'type' => 'image/png'];
             $icons[] = ['src' => $base . '/icon-512.png', 'sizes' => '512x512', 'type' => 'image/png'];
             $icons[] = ['src' => $base . '/icon-maskable-512.png', 'sizes' => '512x512', 'type' => 'image/png', 'purpose' => 'maskable'];
+            # An icon at a disabled path is not answered by this module, so it is not listed either.
+            $icons = array_values(array_filter(
+                $icons,
+                fn($icon) => !$this->isPathDisabled(substr($icon['src'], strlen($base) + 1))
+            ));
         }
         $fields['icons'] = $icons;
 
@@ -1364,13 +1406,15 @@ class FaviconService
         $url = fn(string $name) => htmlspecialchars($base . '/' . $name . '?v=' . $v, ENT_QUOTES);
 
         $tags = [];
-        if (isset($variants['favicon.ico'])) {
+        # A path in disabled_paths is not answered here, so it is not linked either.
+        $linked = fn(string $name) => isset($variants[$name]) && !$this->isPathDisabled($name);
+        if ($linked('favicon.ico')) {
             $tags[] = '<link rel="icon" href="' . $url('favicon.ico') . '" sizes="32x32">';
         }
-        if (isset($variants['apple-touch-icon.png'])) {
+        if ($linked('apple-touch-icon.png')) {
             $tags[] = '<link rel="apple-touch-icon" href="' . $url('apple-touch-icon.png') . '">';
         }
-        if (isset($variants['site.webmanifest'])) {
+        if ($linked('site.webmanifest')) {
             $tags[] = '<link rel="manifest" href="' . $url('site.webmanifest') . '">';
         }
         $theme = (string) $this->getThemeColor();

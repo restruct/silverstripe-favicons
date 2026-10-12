@@ -657,6 +657,38 @@ class FaviconServiceTest extends SapphireTest
         $this->assertStringContainsString('rel="apple-touch-icon"', $s->getHeadTags());
     }
 
+    public function testDisabledPathsAreNotLinked()
+    {
+        $s = $this->service();
+        $this->assertNotNull($this->read('favicon.ico'), 'generate the set, so tags are emitted');
+        $this->assertStringContainsString('rel="manifest"', $s->getHeadTags(), 'precondition');
+
+        # Only the alias goes: the manifest is still linked at site.webmanifest
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['manifest.json']);
+        $this->assertNull($s->resolveRequestPath('manifest.json'));
+        $this->assertStringContainsString('rel="manifest" href="/site.webmanifest', $s->getHeadTags());
+
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['site.webmanifest']);
+        $tags = $s->getHeadTags();
+        $this->assertStringNotContainsString('rel="manifest"', $tags);
+        $this->assertStringContainsString('rel="icon"', $tags);
+
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['favicon.ico', 'apple-touch-icon.png']);
+        $tags = $s->getHeadTags();
+        $this->assertStringNotContainsString('rel="icon"', $tags);
+        $this->assertStringNotContainsString('rel="apple-touch-icon"', $tags);
+        $this->assertStringContainsString('rel="manifest"', $tags);
+        # Exact paths, not patterns
+        $this->assertSame('apple-touch-icon.png', $s->resolveRequestPath('apple-touch-icon-precomposed.png'));
+
+        # A disabled icon is not listed in the manifest
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['icon-192.png']);
+        $icons = $s->getManifestData()['icons'];
+        $this->assertSame(['/icon-512.png', '/icon-maskable-512.png'], array_column($icons, 'src'));
+        Config::modify()->set(FaviconService::class, 'disabled_paths', ['icon-192.png', 'icon-512.png', 'icon-maskable-512.png']);
+        $this->assertArrayNotHasKey('icons', $s->getManifestData(), 'no icons left: the member is dropped');
+    }
+
     public function testATagErrorIsSwallowed()
     {
         $broken = new FavThrowingTagsService();
