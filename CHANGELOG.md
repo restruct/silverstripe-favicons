@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Unreleased (planned 1.1.0)
 
 ### Changed
 
@@ -10,12 +10,19 @@
   512 px and its longest side at most `max_source_size`. The upload hint says so; the unused
   `ERROR_NOT_SQUARE` translation is removed. Square sources generate exactly as before, so
   existing icon sets are kept.
+- The composer description no longer says the source must be square.
 
 ### Added
 
 - `updateManifestData` extension hook on `FaviconService` (now `Extensible`), called with the
   manifest members and the icon source before empty members are dropped. Documented next to
   `manifest_fields`, which also passes unknown keys through.
+- `$FaviconTags` template variable (a `TemplateGlobalProvider`): the same tags the module inserts
+  into the head, for projects that set `frontend_tags: false` and place them themselves. Never
+  throws; an error is logged and renders nothing.
+- `disabled_paths` config: request paths the module does not answer, so a project route can have
+  them (eg `manifest.json`). A disabled path is also not linked: its head tag or manifest icon
+  entry is left out. Every path is still answered by default.
 
 ## 1.0.0 (2026-10-11)
 

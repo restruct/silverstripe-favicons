@@ -60,6 +60,21 @@ them, or browsers get two competing sets. Alternatively keep the theme's tags an
 `frontend_tags: false`, in which case the module still answers the root probes and tags the CMS and
 login pages.
 
+To place the module's tags yourself (eg with `frontend_tags: false`, at a set spot in your own
+`<head>`), use the `$FaviconTags` template variable:
+
+```ss
+<head>
+    <%-- ... --%>
+    $FaviconTags
+</head>
+```
+
+It renders exactly the tags listed under [What gets served](#what-gets-served), or nothing while no
+icon set exists. It ignores the `*_tags` switches (a template that asks for the tags gets them), so
+switch the automatic insertion off for the pages where you use it, or they carry the tags twice.
+Like the automatic insertion it never throws: an error is logged and renders nothing.
+
 ## The source icon
 
 One **PNG** of at least **512x512 px**: its shortest side at least 512 px, its longest side at
@@ -164,7 +179,27 @@ with a 304.
 | `/site.webmanifest`, `/manifest.json` | web app manifest (JSON) | | | `manifest: true` (default) |
 | anything in `extra_paths` | the variant it maps to | | | eg `sites/favicon.ico` |
 
-Paths are matched case-insensitively (`/FAVICON.ICO` works). If the image backend cannot decode
+Paths are matched case-insensitively (`/FAVICON.ICO` works).
+
+Every path above is answered by default. To hand one back to a route of your own (your own
+`/manifest.json`, say), list it in `disabled_paths`:
+
+```yaml
+Restruct\Favicons\FaviconService:
+  disabled_paths:
+    - 'manifest.json'
+```
+
+A disabled path is passed on to the rest of the site, and nothing the module emits points at it:
+disabling `site.webmanifest` drops the `<link rel="manifest">`, `favicon.ico` or
+`apple-touch-icon.png` drops its `<link>`, and `icon-192.png`, `icon-512.png` or
+`icon-maskable-512.png` drops its entry from the manifest's icon list. Disabling only
+`manifest.json` drops just that alias; the manifest stays linked at `/site.webmanifest`. Entries
+are exact paths, not patterns: disabling `apple-touch-icon.png` leaves
+`apple-touch-icon-precomposed.png` answered. To switch the whole manifest off, `manifest: false` is
+still the simpler option. An `extra_paths` alias is a path like any other: listing the alias
+disables it, while disabling the path it points at does not, because the alias was configured on
+purpose. If the image backend cannot decode
 the source (a damaged PNG with a valid header), that is remembered for `failure_ttl` seconds: the
 image paths are 404, their tags are left out, the manifest lists no icons, one warning is logged
 and `dev/build` prints a red line.
@@ -298,6 +333,7 @@ All on `Restruct\Favicons\FaviconService`.
 | `manifest_fields` | see below | Manifest members |
 | `theme_color` | `null` | `<meta name="theme-color">` and manifest `theme_color`; null falls back to admintweaks' `ThemeBrowserColor`, else nothing |
 | `extra_paths` | `[]` | Extra request paths, `path: variant` |
+| `disabled_paths` | `[]` | Request paths not to answer (and not to link), so a project route can have them |
 | `frontend_tags` | `true` | Add the tags on frontend pages (ContentController) |
 | `admin_tags` | `true` | Add the tags in the CMS (LeftAndMain) |
 | `security_tags` | `true` | Add the tags on Security pages (login, lost password) |
