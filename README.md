@@ -3,14 +3,14 @@
 *Maintained by [Restruct](https://github.com/restruct). If this module saves you time, you can
 [support ongoing maintenance](https://github.com/sponsors/restruct).*
 
-One square PNG in, every favicon and touch icon browsers and devices ask for out: served at the
+One PNG in, every favicon and touch icon browsers and devices ask for out: served at the
 paths they probe, and linked from the frontend, the CMS (so the backend tab shows the site's icon,
 not a generic one) and the login pages.
 
 Browsers and home-screen shortcuts probe fixed root paths whether or not a page links them:
 `/favicon.ico`, `/apple-touch-icon.png`, `/apple-touch-icon-precomposed.png`,
 `/apple-touch-icon-152x152.png`, `/manifest.json` and more. Without a file there, each probe is a
-404 that runs the full Silverstripe stack. This module answers all of them from one square PNG.
+404 that runs the full Silverstripe stack. This module answers all of them from one PNG.
 
 ## Requirements
 
@@ -62,15 +62,21 @@ login pages.
 
 ## The source icon
 
-One **PNG**, **square**, at least **512x512 px** (and at most `max_source_size`, 2048 px by
-default). A transparent background is fine and usually best: the variants that must be opaque get
-`background_color` behind the icon.
+One **PNG** of at least **512x512 px**: its shortest side at least 512 px, its longest side at
+most `max_source_size` (2048 px by default). Square is best. A transparent background is fine and
+usually best too: the variants that must be opaque get `background_color` behind the icon.
+
+A **non-square** PNG is accepted and **centre-cropped** to a square of its shortest side, as online
+favicon generators do: a 1024x600 source becomes its middle 600x600. It is cropped rather than
+padded, because padding would invent a margin colour and put the icon off-centre in some variants.
+If the part you want is not in the middle, crop the image yourself before uploading it. The crop is
+done by the project's image backend (the same `croppedResize()` that `Fill()` uses), in the
+AssetStore like everything else.
 
 Anything else is refused with a reason, in the upload field, on `dev/build` and in the Settings
 hint: a JPEG, WebP, GIF or SVG (also when renamed to `.png`; the file's header is checked, not its
-name), a smaller PNG (the 512 px variants would be upscaled and blurry), and a non-square PNG.
-Non-square images are refused rather than padded, because padding would invent a margin colour and
-put the icon off-centre in some variants; cropping is better decided by whoever made the image.
+name), a PNG whose shortest side is under 512 px (the 512 px variants would be upscaled and
+blurry), and a PNG whose longest side is over `max_source_size`.
 
 ### Where the icon comes from
 
@@ -115,7 +121,7 @@ adds a **Site icon (favicon)** upload field on Settings, under the tagline. A pu
 overrules everything else; removing the upload falls back to the next source. The field's
 description says what is currently being served.
 
-- The field accepts **PNG only**, and checks size and shape **at upload**: a refused file shows the
+- The field accepts **PNG only**, and checks its size **at upload**: a refused file shows the
   reason in the field and is not stored. The field's own checks (allowed extensions, maximum file
   size, and silverstripe/mimevalidator's MIME check when installed) still run first.
 - **Choosing an existing file from the files area is switched off**: that path skips upload
@@ -248,6 +254,11 @@ Peak process size (RSS) of one generation, measured on PHP 8.3 with Homebrew's e
 
 That is why `max_source_size` defaults to 2048: a larger source adds nothing to a 512 px icon.
 
+A non-square source costs one extra full-size bitmap at its peak: the backend's `croppedResize()`
+works on a copy of the decoded image, which is released once the cropped square exists. The table
+above was measured on square sources only. `max_source_size` bounds the longest side, so a
+non-square source never decodes to more than a square one at the same limit.
+
 ### Caching and serving
 
 - The root paths are answered by **streaming the file from the AssetStore**, not by redirecting to
@@ -299,7 +310,34 @@ All on `Restruct\Favicons\FaviconService`.
 title), `start_url` empty (the site's base URL, so a subdirectory install works), `display:
 'browser'` (adding the site to a home screen keeps it a normal website; set `standalone`
 deliberately if you want app-like behaviour), `background_color` and `theme_color` empty (falling
-back to the options above). Empty members are left out of the JSON.
+back to the options above). Empty members are left out of the JSON. Keys other than these pass
+through as they are, so members such as `id`, `scope` or `orientation` can be set the same way.
+
+For a member that has to be computed (per environment, from SiteConfig, extra icons), add an
+extension to `FaviconService` with an `updateManifestData` hook. It receives the members (by
+reference, icons included) and the `IconSource` in use (or null), before empty members are dropped,
+so setting a member to null removes it. The result is part of the `?v=` version, so a change is
+picked up by browsers:
+
+```php
+use Restruct\Favicons\IconSource;
+use SilverStripe\Core\Extension;
+
+class ManifestExtension extends Extension
+{
+    protected function updateManifestData(array &$fields, ?IconSource $source): void
+    {
+        $fields['id'] = '/';
+        $fields['scope'] = '/';
+    }
+}
+```
+
+```yaml
+Restruct\Favicons\FaviconService:
+  extensions:
+    - App\Extensions\ManifestExtension
+```
 
 Example with an alias for a probe seen in a 404 log:
 

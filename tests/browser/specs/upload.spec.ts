@@ -11,6 +11,13 @@ import { test, expect } from './support';
 const UPLOAD = path.resolve(__dirname, '../../fixtures/icon2.png');
 // 64 px: refused by the field's validator
 const TOO_SMALL = path.resolve(__dirname, '../../fixtures/small.png');
+// 1024x600, red with a green centre square (drawn with PHP GD): accepted and centre-cropped
+const NON_SQUARE = path.resolve(__dirname, '../../fixtures/wide1024x600.png');
+
+// Width and height from a PNG's IHDR chunk (bytes 16-23, big-endian)
+function pngSize(body: Buffer): [number, number] {
+    return [body.readUInt32BE(16), body.readUInt32BE(20)];
+}
 
 async function touchIconHash(request: APIRequestContext): Promise<string> {
     const response = await request.get('/apple-touch-icon.png');
@@ -81,6 +88,29 @@ test('an uploaded icon replaces the configured one, and removing it restores it'
 
     // Served to an anonymous visitor: the save published the upload
     await expect.poll(() => touchIconHash(request)).not.toBe(configured);
+
+    await page.reload();
+    await removeUpload(page);
+    await expect.poll(() => touchIconHash(request)).toBe(configured);
+    await request.dispose();
+});
+
+test('a non-square PNG is accepted and served as a square icon', async ({ page, playwright, baseURL }) => {
+    const request = await playwright.request.newContext({ baseURL });
+    await page.goto('/admin/settings');
+    await expect(field(page)).toBeVisible();
+    await removeUpload(page);
+    const configured = await touchIconHash(request);
+
+    const uploaded = await chooseFile(page, NON_SQUARE);
+    expect(uploaded.status()).toBe(200);
+    await expect(field(page).locator('.uploadfield-item')).toHaveCount(1);
+    await save(page);
+
+    await expect.poll(() => touchIconHash(request)).not.toBe(configured);
+    const icon = await request.get('/icon-512.png');
+    expect(icon.status()).toBe(200);
+    expect(pngSize(await icon.body())).toEqual([512, 512]);
 
     await page.reload();
     await removeUpload(page);

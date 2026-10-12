@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A non-square PNG source is no longer refused: it is centre-cropped to a square of its shortest
+  side when the icons are generated, through the image backend's `croppedResize()` (as `Fill()`
+  does), so it works on any AssetStore. A source is now accepted when its shortest side is at least
+  512 px and its longest side at most `max_source_size`. The upload hint says so; the unused
+  `ERROR_NOT_SQUARE` translation is removed. Square sources generate exactly as before, so
+  existing icon sets are kept.
+
+### Added
+
+- `updateManifestData` extension hook on `FaviconService` (now `Extensible`), called with the
+  manifest members and the icon source before empty members are dropped. Documented next to
+  `manifest_fields`, which also passes unknown keys through.
+
 ## 1.0.0 (2026-10-11)
 
 First release (would be 1.0.0).
