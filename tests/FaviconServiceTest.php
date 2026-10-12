@@ -23,6 +23,7 @@ use SilverStripe\Versioned\Versioned;
 class FaviconServiceTest extends SapphireTest
 {
     use PinsFaviconConfig;
+    use MakesPngFixtures;
 
     protected $usesDatabase = true;
 
@@ -36,6 +37,7 @@ class FaviconServiceTest extends SapphireTest
 
     protected function tearDown(): void
     {
+        $this->removePngFixtures();
         TestAssetStore::reset();
         parent::tearDown();
     }
@@ -189,6 +191,74 @@ class FaviconServiceTest extends SapphireTest
             $this->assertTrue($s->isDegraded(), $fixture);
             $this->assertSame('', $s->getHeadTags(), $fixture);
         }
+    }
+
+    public function testNonSquareSourceIsCentreCroppedToASquare()
+    {
+        # Wide and tall, so both the horizontal and the vertical centring are checked
+        foreach ([[1024, 600], [600, 1024]] as [$w, $h]) {
+            $label = $w . 'x' . $h;
+            Config::modify()->set(FaviconService::class, 'source', $this->makePng($w, $h));
+            $s = $this->service();
+            $source = $s->getSource();
+            $this->assertNotNull($source, $label . ' is accepted');
+            $this->assertNull($source->getError(), $label);
+            $this->assertNotNull($s->ensureSet($source), $label . ' is generated');
+
+            # The stored copy and the variants are all square
+            $set = $s->getCompletedSet($source);
+            # icon.png: the 600 px centre square, shrunk to the largest variant edge (512 here)
+            $this->assertSame(
+                [512, 512],
+                FaviconService::pngDimensions((string) $this->store()->getAsString($s->setPath($set['id'], 'icon.png'), $set['src'])),
+                $label . ': icon.png is the cropped square'
+            );
+            $this->assertSame([512, 512], FaviconService::pngDimensions((string) $this->read('icon-512.png')), $label);
+            $this->assertSame([180, 180], FaviconService::pngDimensions((string) $this->read('apple-touch-icon.png')), $label);
+
+            # The source is red outside its centre square: a centre crop is green to every edge.
+            # A crop from a corner, or a squash, leaves red at one of these points.
+            $im = imagecreatefromstring((string) $this->read('icon-512.png'));
+            foreach ([[8, 256], [503, 256], [256, 8], [256, 503], [256, 256], [8, 8], [503, 503]] as [$x, $y]) {
+                $c = imagecolorsforindex($im, imagecolorat($im, $x, $y));
+                $this->assertTrue(
+                    $c['green'] > 200 && $c['red'] < 60,
+                    "{$label}: pixel {$x},{$y} is centre content, got " . json_encode($c)
+                );
+            }
+        }
+    }
+
+    public function testNonSquareSourceWithAShortSideBelow512IsRefused()
+    {
+        $path = $this->makePng(600, 400);
+        $s = $this->service();
+        $this->assertStringContainsString(
+            '600x400 px; it must be at least 512x512',
+            (string) $s->checkPng((string) file_get_contents($path))
+        );
+        Config::modify()->set(FaviconService::class, 'source', $path);
+        $this->assertNull($s->getSource());
+        $this->assertStringContainsString('at least 512x512', (string) $s->getSourceCandidates()[0]->getError());
+    }
+
+    public function testNonSquareSourceWithALongSideAboveMaxSourceSizeIsRefused()
+    {
+        $s = $this->service();
+        # The long side is bounded either way round, whichever of width and height it is
+        foreach ([[2400, 600], [600, 2400]] as [$w, $h]) {
+            $path = $this->makePng($w, $h);
+            $this->assertStringContainsString(
+                "{$w}x{$h} px; it must be at most 2048x2048",
+                (string) $s->checkPng((string) file_get_contents($path)),
+                "{$w}x{$h}"
+            );
+            Config::modify()->set(FaviconService::class, 'source', $path);
+            $this->assertNull($s->getSource(), "{$w}x{$h}");
+        }
+        # And it is the configured limit that applies
+        Config::modify()->set(FaviconService::class, 'max_source_size', 2400);
+        $this->assertNotNull($s->getSource(), 'accepted once max_source_size covers the long side');
     }
 
     public function testUploadOverridesYamlWhenAllowed()

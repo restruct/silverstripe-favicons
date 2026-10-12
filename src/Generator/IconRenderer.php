@@ -61,7 +61,8 @@ class IconRenderer
     public function shrink(object $resource, int $edge): object
     {
         if ($resource instanceof ImageInterface) {
-            # scaleDown() never enlarges; the source is square, so this is $edge x $edge at most.
+            # scaleDown() never enlarges; the source is square (FaviconService::buildSet() centre-crops
+            # a non-square one first), so this is $edge x $edge at most.
             return $resource->scaleDown($edge, $edge);
         }
         return $resource->resize($edge, $edge, function ($constraint) {
@@ -83,7 +84,8 @@ class IconRenderer
         if ($resource instanceof ImageInterface) {
             # Intervention 3 (Silverstripe 6). The clone is of the already shrunk source (at most the
             # largest variant), never of the full-size decode. scale() keeps the aspect ratio and may
-            # upscale; the source is square, so the result is $inner x $inner. createImage() starts
+            # upscale; the source is square (cropped in FaviconService::buildSet()), so the result is
+            # $inner x $inner. createImage() starts
             # transparent.
             $scaled = (clone $resource)->scale($inner, $inner);
             $canvas = $resource->driver()->createImage($size, $size);

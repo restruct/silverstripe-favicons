@@ -16,6 +16,7 @@ use SilverStripe\SiteConfig\SiteConfig;
 class SiteConfigFaviconExtensionTest extends SapphireTest
 {
     use PinsFaviconConfig;
+    use MakesPngFixtures;
 
     protected $usesDatabase = true;
 
@@ -30,6 +31,7 @@ class SiteConfigFaviconExtensionTest extends SapphireTest
 
     protected function tearDown(): void
     {
+        $this->removePngFixtures();
         TestAssetStore::reset();
         parent::tearDown();
     }
@@ -122,6 +124,34 @@ class SiteConfigFaviconExtensionTest extends SapphireTest
         $upload->clearErrors();
         $this->assertFalse($upload->validate($this->tmpFile('icon.png', 'icon.svg')));
         $this->assertStringContainsString('is not allowed', implode(' ', $upload->getErrors()));
+    }
+
+    public function testUploadValidatorAcceptsANonSquarePngAndRefusesBadSides()
+    {
+        $upload = $this->uploadField()->getUpload();
+        $validator = $upload->getValidator();
+        # The fixtures are not real uploads
+        Config::modify()->set(Upload_Validator::class, 'use_is_uploaded_file', false);
+        $entry = function (string $path): array {
+            return ['name' => basename($path), 'type' => 'image/png', 'tmp_name' => $path, 'error' => UPLOAD_ERR_OK, 'size' => filesize($path)];
+        };
+
+        # Accepted: it is centre-cropped when the icons are generated
+        $this->assertTrue($upload->validate($entry($this->makePng(1024, 600))), implode(' ', $upload->getErrors()));
+
+        foreach ([[600, 400, 'at least 512x512'], [2400, 600, 'at most 2048x2048']] as [$w, $h, $reason]) {
+            $upload->clearErrors();
+            $validator->clearErrors();
+            $this->assertFalse($upload->validate($entry($this->makePng($w, $h))), "{$w}x{$h}");
+            $this->assertStringContainsString("{$w}x{$h} px; it must be {$reason}", implode(' ', $upload->getErrors()));
+        }
+    }
+
+    public function testUploadHintNoLongerAsksForASquare()
+    {
+        $description = (string) $this->uploadField()->getDescription();
+        $this->assertStringContainsString('cropped to its centre square', $description);
+        $this->assertStringNotContainsString('PNG, square', $description);
     }
 
     public function testSavingAnUnusableIconIsRefused()

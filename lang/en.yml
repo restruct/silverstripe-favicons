@@ -1,7 +1,6 @@
 en:
   Restruct\Favicons\FaviconService:
     ERROR_NOT_PNG: 'The file is not a PNG image.'
-    ERROR_NOT_SQUARE: 'The image is {w}x{h} px; it must be square.'
     ERROR_TOO_SMALL: 'The image is {w}x{h} px; it must be at least {min}x{min} px.'
     ERROR_TOO_LARGE: 'The image is {w}x{h} px; it must be at most {max}x{max} px.'
     STATUS_SKIPPED: 'Skipped {origin}: {error}'
@@ -11,4 +10,4 @@ en:
     STATUS_OK: 'Serving all favicon variants from {origin}.'
   Restruct\Favicons\Extensions\SiteConfigFaviconExtension:
     FaviconSource: 'Site icon (favicon)'
-    UPLOAD_HINT: 'PNG, square, at least {min}x{min} px, preferably with a transparent background. Overrides the icon set in the site configuration.'
+    UPLOAD_HINT: 'PNG, at least {min}x{min} px, preferably square and with a transparent background; a non-square image is cropped to its centre square. Overrides the icon set in the site configuration.'

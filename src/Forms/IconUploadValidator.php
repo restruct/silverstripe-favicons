@@ -9,8 +9,10 @@ use SilverStripe\Assets\Upload_Validator;
 
 /**
  * Upload validator for the favicon field: runs the field's normal validator first, then refuses
- * anything that is not a square PNG of at least FaviconService::MIN_SOURCE_SIZE px, so the editor
- * gets the reason at upload time instead of an icon that silently is not used.
+ * anything that is not a PNG of at least FaviconService::MIN_SOURCE_SIZE px on its shortest side and
+ * at most max_source_size on its longest (a non-square one is accepted and centre-cropped when the
+ * icons are generated), so the editor gets the reason at upload time instead of an icon that
+ * silently is not used.
  *
  * Wraps the validator the field already had rather than replacing it, because that one may be
  * silverstripe/mimevalidator's MimeUploadValidator (swapped in through the Injector) or a project's

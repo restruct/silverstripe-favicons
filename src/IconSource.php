@@ -8,7 +8,7 @@ namespace Restruct\Favicons;
  * One candidate for the project icon: a PNG from a CMS upload, from admintweaks' SiteConfig.FavIcon,
  * or from the YAML `source`. Every variant is generated from the one candidate that is usable.
  *
- * A candidate that was found but is unusable (not a PNG, too small, not square) carries the reason in
+ * A candidate that was found but is unusable (not a PNG, too small, too large) carries the reason in
  * getError(), so the CMS and dev/build can say why it was skipped instead of silently falling back.
  *
  * The bytes are loaded lazily: head tags and ETags on every page request only need the hash, and
