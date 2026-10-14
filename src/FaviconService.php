@@ -40,6 +40,9 @@ use Throwable;
  * of that file, and favicon.ico next to it. None of them gets a File record. The set id is a hash of
  * the source content and the generation config, so a new icon or new config is a new folder, and the
  * previous set is deleted once the new one is complete.
+ *
+ * Copies of the root-path files can also be written into the public webroot (write_public_files),
+ * so the web server answers them before PHP runs; see PublicFileWriter.
  */
 class FaviconService
 {
@@ -260,6 +263,24 @@ class FaviconService
      * @config
      */
     private static string $asset_folder = '_favicons';
+
+    /**
+     * Also write every root-path file (favicon.ico, apple-touch-icon*.png, site.webmanifest ...) into
+     * the public webroot on dev/build and when the icon changes in the CMS, so the web server serves
+     * them without PHP. Skipped when the webroot is not writable; the route keeps answering then.
+     * See PublicFileWriter.
+     *
+     * @config
+     */
+    private static bool $write_public_files = true;
+
+    /**
+     * Write those files in dev mode too. Off by default: a local webroot is usually a git working
+     * tree, where the written files (and a renamed favicon.ico) would show up as changes.
+     *
+     * @config
+     */
+    private static bool $write_public_files_in_dev = false;
 
     /**
      * Cache key of the registry of generated sets: set id => [src hash, ico hash, done].

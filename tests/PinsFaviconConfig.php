@@ -52,6 +52,10 @@ trait PinsFaviconConfig
             'max_source_size' => 2048,
             'busy_ttl' => 120,
             'asset_folder' => '_favicons',
+            # Not the shipped default (true): a test must never write into the webroot of the site
+            # it runs in. PublicFileWriterTest switches it on with a temp folder as webroot.
+            'write_public_files' => false,
+            'write_public_files_in_dev' => false,
         ];
         foreach ($defaults as $key => $value) {
             # remove() first: set() on an array merges with what the host configured

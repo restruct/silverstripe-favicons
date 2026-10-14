@@ -11,3 +11,11 @@ en:
   Restruct\Favicons\Extensions\SiteConfigFaviconExtension:
     FaviconSource: 'Site icon (favicon)'
     UPLOAD_HINT: 'PNG, at least {min}x{min} px, preferably square and with a transparent background; a non-square image is cropped to its centre square. Overrides the icon set in the site configuration.'
+  Restruct\Favicons\PublicFileWriter:
+    UNWRITABLE: 'The webroot ({folder}) is not writable, so no icon files are written there; the icons are served through PHP.'
+    WROTE: 'wrote {files}'
+    REMOVED: 'removed {files}'
+    CURRENT: '{count} up to date'
+    FAILED: '{file} skipped ({reason}, served through PHP)'
+    RENAMED: 'renamed the existing {file} to {backup}: remove {file} from your project (eg its repository), this module writes it now'
+    SUMMARY: 'Icon files in the webroot ({folder}): {parts}.'
