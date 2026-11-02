@@ -1,102 +1,45 @@
 # Silverstripe Favicons
 
+One PNG in, every favicon and touch icon browsers and devices ask for out: served at the paths
+they probe, and linked from the frontend, the CMS (so the backend tab shows the site's icon, not a
+generic one) and the login pages. Set the icon in YAML, or let editors upload it in Settings. For
+Silverstripe 5.4 and 6.
+
+![The Settings screen of the Silverstripe CMS with a "Site icon (favicon)" upload field under the tagline, holding a PNG, and the field's note saying all favicon variants are served from that upload](docs/images/settings-upload.png)
+
 *Maintained by [Restruct](https://github.com/restruct). If this module saves you time, you can
 [support ongoing maintenance](https://github.com/sponsors/restruct).*
 
-One PNG in, every favicon and touch icon browsers and devices ask for out: served at the
-paths they probe, and linked from the frontend, the CMS (so the backend tab shows the site's icon,
-not a generic one) and the login pages.
+## Browsers ask for icons your site never linked
 
 Browsers and home-screen shortcuts probe fixed root paths whether or not a page links them:
 `/favicon.ico`, `/apple-touch-icon.png`, `/apple-touch-icon-precomposed.png`,
 `/apple-touch-icon-152x152.png`, `/manifest.json` and more. Without a file there, each probe is a
-404 that runs the full Silverstripe stack. This module answers all of them from one PNG, and
-outside dev mode also writes them into the webroot, so the web server serves them without PHP.
+404 that runs the full Silverstripe stack. Covering them by hand means a dozen image sizes, an ICO
+file and a web manifest, kept in sync every time the icon changes, plus the `<link>` tags in the
+theme. And the theme's tags never reach the CMS or the login pages, so the backend tab shows a
+generic icon.
 
-## Requirements
+## One PNG in, every icon out
 
-- Silverstripe 5.4 or newer, or 6 (`silverstripe/framework ^5.4 || ^6`, admin, assets, siteconfig)
-- PHP 8.1 or newer
-- A working Silverstripe image backend. The icons are drawn by the framework's own `Image_Backend`
-  (Intervention Image 2 on Silverstripe 5, 3 on Silverstripe 6, with the GD driver by default), so
-  whatever already resizes your site's images resizes the icons too. The module makes no GD or
-  Imagick calls of its own.
+This module answers all of those probes from one PNG, and outside dev mode also writes them into
+the webroot, so the web server serves them without PHP. It draws the variants with the project's
+own image backend, stores them in the AssetStore, and adds the `<link>` tags to every frontend
+page, the CMS and the login pages without template changes.
 
-`composer.json` is the source of truth for supported versions.
+![The generated icons as the site serves them: favicon.ico at 16, 32 and 48 px with a transparent background, the 180 px apple-touch-icon.png on a white background (also shown with the rounded corners iOS applies), the transparent icon-192.png from the web manifest, and the maskable 512 px icon inside the circle Android crops it to](docs/images/generated-icons.png)
 
-| Branch | Module version | Silverstripe | PHP |
-|---|---|---|---|
-| `main` | 1.x (unreleased) | 5.4+, 6 | 8.1+ |
+- **Every variant from one source:** `favicon.ico` (16, 32, 48), the Apple touch icons in the sizes
+  iOS asks for, the 192 and 512 px manifest icons, a maskable icon with a safe-zone margin, and the
+  web manifest itself.
+- **Opaque where it has to be:** the touch icons and the maskable icon get `background_color`
+  behind a transparent source, because iOS paints transparency black.
+- **Cheap to serve:** generated once per icon and config, cached with long-lived headers and an
+  ETag, and never during a page render.
+- **Editors can own it:** with `allow_upload: true` the icon is a validated upload in Settings,
+  and admintweaks' icon field is picked up as well when installed.
 
-## Installation
-
-```sh
-composer require restruct/silverstripe-favicons
-```
-
-Point it at your icon, then run `dev/build` (SS5) or `sake db:build` (SS6):
-
-```yaml
-# app/_config/favicons.yml
-Restruct\Favicons\FaviconService:
-  source: 'themes/mytheme/images/icon.png'
-```
-
-`dev/build` generates the icons and prints one line saying what is being served, eg
-`Favicons: Serving all favicon variants from file:themes/mytheme/images/icon.png.` The line is red
-when a source is set but cannot be used, with the reason.
-
-### Existing icon files in the webroot
-
-The web server serves an existing file before Silverstripe runs, so a `public/favicon.ico`,
-`public/apple-touch-icon.png` or `public/site.webmanifest` the project ships (some skeletons have a
-`public/favicon.ico`) would keep serving the old icon. Where the module writes its own files into
-the webroot (see [Files in the webroot](#files-in-the-webroot)), `dev/build` renames such a file
-in place, eg to `favicon.bu-20261012.ico`, writes its own, and says so in its output: **remove the
-original from the project** (its repository), or the next deploy brings it back. A file that is
-byte-identical to the module's is simply kept. Each path is backed up only once: from then on the
-file there is the module's, and it is overwritten without another backup.
-
-Where the module does not write (dev mode, `write_public_files: false`, a webroot it cannot write,
-the other servers of a multi-server setup) those files still win: delete them yourself.
-
-**nginx:** some stock vhosts (Laravel Forge among them) contain an exact-match block such as
-`location = /favicon.ico { access_log off; log_not_found off; }` without a `try_files`. With the
-module's file in the webroot that block serves it as it is. Only where the module does not write
-the file (see above) does nginx answer `/favicon.ico` itself with a 404, and with a server-level
-`error_page 404 /index.php` the icon body then arrives with status 404. For those setups, pass the
-request on to Silverstripe in that block:
-
-```nginx
-location = /favicon.ico { access_log off; log_not_found off; try_files $uri /index.php?$query_string; }
-```
-
-Do the same for any similar block (e.g. `location = /apple-touch-icon.png`), or remove it.
-
-### Remove icon tags from your theme
-
-The module adds its `<link>` tags to every page without template changes. If your theme's
-`Page.ss` already has its own `<link rel="icon">`, `apple-touch-icon` or `manifest` tags, remove
-them, or browsers get two competing sets. Alternatively keep the theme's tags and set
-`frontend_tags: false`, in which case the module still answers the root probes and tags the CMS and
-login pages.
-
-To place the module's tags yourself (eg with `frontend_tags: false`, at a set spot in your own
-`<head>`), use the `$FaviconTags` template variable:
-
-```ss
-<head>
-    <%-- ... --%>
-    $FaviconTags
-</head>
-```
-
-It renders exactly the tags listed under [What gets served](#what-gets-served), or nothing while no
-icon set exists. It ignores the `*_tags` switches (a template that asks for the tags gets them), so
-switch the automatic insertion off for the pages where you use it, or they carry the tags twice.
-Like the automatic insertion it never throws: an error is logged and renders nothing.
-
-## The source icon
+### The source icon
 
 One **PNG** of at least **512x512 px**: its shortest side at least 512 px, its longest side at
 most `max_source_size` (2048 px by default). Square is best. A transparent background is fine and
@@ -114,7 +57,7 @@ hint: a JPEG, WebP, GIF or SVG (also when renamed to `.png`; the file's header i
 name), a PNG whose shortest side is under 512 px (the 512 px variants would be upscaled and
 blurry), and a PNG whose longest side is over `max_source_size`.
 
-### Where the icon comes from
+#### Where the icon comes from
 
 The first usable one of these wins:
 
@@ -129,7 +72,7 @@ next one is used; `dev/build` and the Settings hint say which one was skipped an
 puts the most deliberate choice first: this module's own field exists only because a project
 switched it on, admintweaks' field is a general "logos" field, and YAML is the developer's default.
 
-### From configuration
+#### From configuration
 
 `source` is a resource string, resolved through Silverstripe's `ModuleResourceLoader`, the same
 resolver behind `$resourceURL()` in templates:
@@ -138,6 +81,7 @@ resolver behind `$resourceURL()` in templates:
 |---|---|
 | Module resource (`vendor/package:path`) | `mycompany/site-theme:client/images/icon.png` |
 | Path relative to the project root | `app/images/icon.png`, `themes/mytheme/images/icon.png`, `public/icon.png` |
+| Path relative to the webroot (tried after the project root) | `icon.png` finds `public/icon.png` |
 | Absolute filesystem path | `/srv/shared/icon.png` |
 
 It names one file. It is **not looked up through the theme stack**, so when the site switches to
@@ -146,7 +90,7 @@ a module, so refer to it by path.
 
 The file is read where it is: it does not become a File in the CMS.
 
-### From the CMS (optional)
+#### From the CMS (optional)
 
 ```yaml
 Restruct\Favicons\FaviconService:
@@ -170,7 +114,7 @@ description says what is currently being served.
 - With `allow_upload: false` (the default) a stored upload is ignored and the field is hidden. The
   database column exists either way, so switching the option never changes the schema.
 
-### With silverstripe-admintweaks
+#### With silverstripe-admintweaks
 
 admintweaks' field is a general file picker: it also accepts a file **chosen from the files
 area**, including one whose CanView is restricted, and does not check the image. Whatever it holds,
@@ -183,7 +127,7 @@ colour (`<meta name="theme-color">` and the manifest's `theme_color`) when it ho
 `theme_color` is not configured. Set `use_admintweaks: false` to ignore both fields. This module's
 own upload is a separate `FaviconSource` relation, so the two fields never collide.
 
-## What gets served
+### What gets served
 
 All paths are relative to the site's base URL. Responses carry an ETag and answer `If-None-Match`
 with a 304.
@@ -194,7 +138,7 @@ with a 304.
 | `/apple-touch-icon.png` | PNG | 180 | `background_color` | iOS paints transparency black |
 | `/apple-touch-icon-precomposed.png` | same as above | 180 | | legacy iOS probe |
 | `/apple-touch-icon-120x120.png`, `-152x152`, `-167x167`, `-180x180` | PNG | as named | `background_color` | `touch_sizes` |
-| `/apple-touch-icon-NxN[-precomposed].png`, any other N | nearest generated size | | | eg `240x240` gets the 180; `0x0` and non-square names are 404 |
+| `/apple-touch-icon-NxN[-precomposed].png`, any other N | nearest generated size | | | eg `240x240` gets the 180; on a tie the larger size (`136x136` gets the 152); `0x0` and non-square names are 404 |
 | `/icon-192.png`, `/icon-512.png` | PNG | 192, 512 | transparent | referenced by the manifest |
 | `/icon-maskable-512.png` | PNG | 512 | `background_color` | `maskable_padding` safe zone |
 | `/site.webmanifest`, `/manifest.json` | web app manifest (JSON) | | | `manifest: true` (default) |
@@ -234,6 +178,180 @@ Tags added to the `<head>` of frontend pages, the CMS and the Security (login) p
 <meta name="theme-color" content="...">                        <!-- theme colour set -->
 ```
 
+## Technical
+
+### Requirements and compatibility
+
+- Silverstripe 5.4 or newer, or 6 (`silverstripe/framework ^5.4 || ^6`, admin, assets, siteconfig)
+- PHP 8.1 or newer
+- Optional: `silverstripe/cms` for the tags on frontend pages (without it there is no
+  `ContentController` to add them to), and `silverstripe/asset-admin` for the upload field
+  (`allow_upload: true` shows no field without it)
+- A working Silverstripe image backend. The icons are drawn by the framework's own `Image_Backend`
+  (Intervention Image 2 on Silverstripe 5, 3 on Silverstripe 6, with the GD driver by default), so
+  whatever already resizes your site's images resizes the icons too. The module makes no GD or
+  Imagick calls of its own.
+
+`composer.json` is the source of truth for supported versions.
+
+| Branch | Module version | Silverstripe | PHP |
+|---|---|---|---|
+| `main` | 1.x | 5.4+, 6 | 8.1+ |
+
+### Installation
+
+```sh
+composer require restruct/silverstripe-favicons
+```
+
+Point it at your icon, then run `dev/build` (SS5) or `sake db:build` (SS6):
+
+```yaml
+# app/_config/favicons.yml
+Restruct\Favicons\FaviconService:
+  source: 'themes/mytheme/images/icon.png'
+```
+
+`dev/build` generates the icons and prints one line saying what is being served, eg
+`Favicons: Serving all favicon variants from file:themes/mytheme/images/icon.png.` The line is red
+when a source is set but cannot be used, with the reason, and also when a higher-precedence source
+(see [Where the icon comes from](#where-the-icon-comes-from)) is skipped and a lower one is served.
+
+#### Existing icon files in the webroot
+
+The web server serves an existing file before Silverstripe runs, so a `public/favicon.ico`,
+`public/apple-touch-icon.png` or `public/site.webmanifest` the project ships (some skeletons have a
+`public/favicon.ico`) would keep serving the old icon. Where the module writes its own files into
+the webroot (see [Files in the webroot](#files-in-the-webroot)), `dev/build` renames such a file
+in place, eg to `favicon.bu-20261012.ico` (`favicon.bu-20261012-2.ico` if that name is taken),
+writes its own, and says so in its output: **remove the original from the project** (its
+repository), or the next deploy brings it back. A Settings save that writes the files does the
+same rename; having no output to show it in, it logs a warning instead. A file that is
+byte-identical to the module's is simply kept. Each path is backed up only once: from then on the
+file there is the module's, and it is overwritten without another backup.
+
+Where the module does not write (dev mode, `write_public_files: false`, a webroot it cannot write,
+the other servers of a multi-server setup) those files still win: delete them yourself.
+
+**nginx:** some stock vhosts (Laravel Forge among them) contain an exact-match block such as
+`location = /favicon.ico { access_log off; log_not_found off; }` without a `try_files`. With the
+module's file in the webroot that block serves it as it is. Only where the module does not write
+the file (see above) does nginx answer `/favicon.ico` itself with a 404, and with a server-level
+`error_page 404 /index.php` the icon body then arrives with status 404. For those setups, pass the
+request on to Silverstripe in that block:
+
+```nginx
+location = /favicon.ico { access_log off; log_not_found off; try_files $uri /index.php?$query_string; }
+```
+
+Do the same for any similar block (e.g. `location = /apple-touch-icon.png`), or remove it.
+
+#### Remove icon tags from your theme
+
+The module adds its `<link>` tags to every page without template changes. If your theme's
+`Page.ss` already has its own `<link rel="icon">`, `apple-touch-icon` or `manifest` tags, remove
+them, or browsers get two competing sets. Alternatively keep the theme's tags and set
+`frontend_tags: false`, in which case the module still answers the root probes and tags the CMS and
+login pages.
+
+To place the module's tags yourself (eg with `frontend_tags: false`, at a set spot in your own
+`<head>`), use the `$FaviconTags` template variable:
+
+```ss
+<head>
+    <%-- ... --%>
+    $FaviconTags
+</head>
+```
+
+It renders exactly the tags listed under [What gets served](#what-gets-served), or nothing while no
+icon set exists. It ignores the `*_tags` switches (a template that asks for the tags gets them), so
+switch the automatic insertion off for the pages where you use it, or they carry the tags twice.
+Like the automatic insertion it never throws: an error is logged and renders nothing.
+
+### Configuration reference
+
+All on `Restruct\Favicons\FaviconService`.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `source` | `null` | The icon, see [From configuration](#from-configuration) |
+| `allow_upload` | `false` | Show the upload field on Settings; a published upload overrules every other source |
+| `upload_folder` | `'favicon'` | Asset folder for uploads |
+| `use_admintweaks` | `true` | Use admintweaks' `FavIcon` and `ThemeBrowserColor` as fallbacks when set |
+| `max_source_size` | `2048` | Largest accepted source edge in px, see [Memory](#memory); 0 for no limit |
+| `busy_ttl` | `120` | Seconds a set counts as "being generated" if the worker building it dies |
+| `background_color` | `'#ffffff'` | Fill for the opaque variants (touch icons, maskable); also the manifest default |
+| `touch_icon_padding` | `0` | Margin around the icon on the touch icons, % of the edge per side |
+| `maskable_padding` | `10` | Margin on the maskable icon, % per side (10 keeps it inside Android's 80% safe circle) |
+| `ico_sizes` | `[16, 32, 48]` | Sizes inside `favicon.ico` (1-256) |
+| `touch_sizes` | `[120, 152, 167, 180]` | `apple-touch-icon-NxN.png` sizes; 180 is always included |
+| `manifest` | `true` | Serve `/site.webmanifest` and `/manifest.json` and link it |
+| `manifest_fields` | see below | Manifest members |
+| `theme_color` | `null` | `<meta name="theme-color">` and manifest `theme_color`; null falls back to admintweaks' `ThemeBrowserColor`, else nothing |
+| `extra_paths` | `[]` | Extra request paths, `path: variant` |
+| `disabled_paths` | `[]` | Request paths not to answer (and not to link), so a project route can have them |
+| `frontend_tags` | `true` | Add the tags on frontend pages (ContentController) |
+| `admin_tags` | `true` | Add the tags in the CMS (LeftAndMain) |
+| `security_tags` | `true` | Add the tags on Security pages (login, lost password) |
+| `max_age` | `86400` | Cache lifetime for a bare probe, seconds |
+| `versioned_max_age` | `31536000` | Cache lifetime for a `?v=` URL, seconds (sent with `immutable`) |
+| `failure_ttl` | `600` | Seconds an undecodable source (or one that killed the worker) is remembered (variants withdrawn, not retried) |
+| `asset_folder` | `'_favicons'` | AssetStore folder for the generated sets |
+| `write_public_files` | `true` | Also write the root-path files into the webroot, see [Files in the webroot](#files-in-the-webroot) |
+| `write_public_files_in_dev` | `false` | Write them in dev mode too |
+
+`manifest_fields` defaults: `name` and `short_name` empty (`name` falls back to the SiteConfig
+title, `short_name` to `name`), `start_url` empty (the site's base URL, so a subdirectory
+install works), `display:
+'browser'` (adding the site to a home screen keeps it a normal website; set `standalone`
+deliberately if you want app-like behaviour), `background_color` and `theme_color` empty (falling
+back to the options above). Empty members are left out of the JSON. Keys other than these pass
+through as they are, so members such as `id`, `scope` or `orientation` can be set the same way.
+
+For a member that has to be computed (per environment, from SiteConfig, extra icons), add an
+extension to `FaviconService` with an `updateManifestData` hook. It receives the members (by
+reference, icons included) and the `IconSource` in use (or null), before empty members are dropped,
+so setting a member to null removes it. The result is part of the `?v=` version, so a change is
+picked up by browsers:
+
+```php
+namespace App\Extensions;
+
+use Restruct\Favicons\IconSource;
+use SilverStripe\Core\Extension;
+
+class ManifestExtension extends Extension
+{
+    protected function updateManifestData(array &$fields, ?IconSource $source): void
+    {
+        $fields['id'] = '/';
+        $fields['scope'] = '/';
+    }
+}
+```
+
+```yaml
+Restruct\Favicons\FaviconService:
+  extensions:
+    - App\Extensions\ManifestExtension
+```
+
+Example with an alias for a probe seen in a 404 log:
+
+```yaml
+Restruct\Favicons\FaviconService:
+  source: 'app/images/icon.png'
+  allow_upload: true
+  background_color: '#0b3d91'
+  touch_icon_padding: 8
+  theme_color: '#0b3d91'
+  manifest_fields:
+    short_name: 'Example'
+  extra_paths:
+    'sites/favicon.ico': 'favicon.ico'
+```
+
 ### Storage
 
 The generated files live in the framework's **AssetStore**, so they work with whatever adapter the
@@ -249,7 +367,8 @@ project uses (local disk, S3 and so on), under `assets/_favicons/<set>/`:
 
 None of these has a File record, so nothing appears in the CMS files area. `<set>` is a hash of
 the source content and the generation config (sizes, colours, margins), so a new icon or new config
-is a new folder.
+is a new folder. The hash also includes the module's generator version, so a module update that
+changes how icons are drawn makes a new set too.
 
 **When a set is generated:** on `dev/build`, when the icon changes in Settings (on save and
 publish), and otherwise by the first icon request (`/favicon.ico` and the like, which browsers send
@@ -384,87 +503,7 @@ favicon.ico, ...` or `12 up to date`, plus any rename (see
 - **Subdirectory installs:** the manifest's `start_url` and icon URLs come from the base URL; set
   `SS_BASE_URL` so `dev/build` on the command line writes the right ones.
 
-## Configuration reference
-
-All on `Restruct\Favicons\FaviconService`.
-
-| Option | Default | Meaning |
-|---|---|---|
-| `source` | `null` | The icon, see [From configuration](#from-configuration) |
-| `allow_upload` | `false` | Show the upload field on Settings; a published upload overrules every other source |
-| `upload_folder` | `'favicon'` | Asset folder for uploads |
-| `use_admintweaks` | `true` | Use admintweaks' `FavIcon` and `ThemeBrowserColor` as fallbacks when set |
-| `max_source_size` | `2048` | Largest accepted source edge in px, see [Memory](#memory); 0 for no limit |
-| `busy_ttl` | `120` | Seconds a set counts as "being generated" if the worker building it dies |
-| `background_color` | `'#ffffff'` | Fill for the opaque variants (touch icons, maskable); also the manifest default |
-| `touch_icon_padding` | `0` | Margin around the icon on the touch icons, % of the edge per side |
-| `maskable_padding` | `10` | Margin on the maskable icon, % per side (10 keeps it inside Android's 80% safe circle) |
-| `ico_sizes` | `[16, 32, 48]` | Sizes inside `favicon.ico` (1-256) |
-| `touch_sizes` | `[120, 152, 167, 180]` | `apple-touch-icon-NxN.png` sizes; 180 is always included |
-| `manifest` | `true` | Serve `/site.webmanifest` and `/manifest.json` and link it |
-| `manifest_fields` | see below | Manifest members |
-| `theme_color` | `null` | `<meta name="theme-color">` and manifest `theme_color`; null falls back to admintweaks' `ThemeBrowserColor`, else nothing |
-| `extra_paths` | `[]` | Extra request paths, `path: variant` |
-| `disabled_paths` | `[]` | Request paths not to answer (and not to link), so a project route can have them |
-| `frontend_tags` | `true` | Add the tags on frontend pages (ContentController) |
-| `admin_tags` | `true` | Add the tags in the CMS (LeftAndMain) |
-| `security_tags` | `true` | Add the tags on Security pages (login, lost password) |
-| `max_age` | `86400` | Cache lifetime for a bare probe, seconds |
-| `versioned_max_age` | `31536000` | Cache lifetime for a `?v=` URL, seconds (sent with `immutable`) |
-| `failure_ttl` | `600` | Seconds an undecodable source (or one that killed the worker) is remembered (variants withdrawn, not retried) |
-| `asset_folder` | `'_favicons'` | AssetStore folder for the generated sets |
-| `write_public_files` | `true` | Also write the root-path files into the webroot, see [Files in the webroot](#files-in-the-webroot) |
-| `write_public_files_in_dev` | `false` | Write them in dev mode too |
-
-`manifest_fields` defaults: `name` and `short_name` empty (both fall back to the SiteConfig
-title), `start_url` empty (the site's base URL, so a subdirectory install works), `display:
-'browser'` (adding the site to a home screen keeps it a normal website; set `standalone`
-deliberately if you want app-like behaviour), `background_color` and `theme_color` empty (falling
-back to the options above). Empty members are left out of the JSON. Keys other than these pass
-through as they are, so members such as `id`, `scope` or `orientation` can be set the same way.
-
-For a member that has to be computed (per environment, from SiteConfig, extra icons), add an
-extension to `FaviconService` with an `updateManifestData` hook. It receives the members (by
-reference, icons included) and the `IconSource` in use (or null), before empty members are dropped,
-so setting a member to null removes it. The result is part of the `?v=` version, so a change is
-picked up by browsers:
-
-```php
-use Restruct\Favicons\IconSource;
-use SilverStripe\Core\Extension;
-
-class ManifestExtension extends Extension
-{
-    protected function updateManifestData(array &$fields, ?IconSource $source): void
-    {
-        $fields['id'] = '/';
-        $fields['scope'] = '/';
-    }
-}
-```
-
-```yaml
-Restruct\Favicons\FaviconService:
-  extensions:
-    - App\Extensions\ManifestExtension
-```
-
-Example with an alias for a probe seen in a 404 log:
-
-```yaml
-Restruct\Favicons\FaviconService:
-  source: 'app/images/icon.png'
-  allow_upload: true
-  background_color: '#0b3d91'
-  touch_icon_padding: 8
-  theme_color: '#0b3d91'
-  manifest_fields:
-    short_name: 'Example'
-  extra_paths:
-    'sites/favicon.ico': 'favicon.ico'
-```
-
-## Running the tests
+### Running the tests
 
 From a host project that requires this module through a symlinked path repository (`/tests` is
 `export-ignore`, so a dist install has no tests):
@@ -482,6 +521,15 @@ configured icon, that a Settings upload replaces it end to end, and that a too-s
 at upload. They run through the maintainers' shared runner, which
 builds one scratch host per Silverstripe major, and in CI through `.github/workflows/browser-tests.yml`.
 
-## License
+The screenshots in this README are real captures from such a host, uploading a neutral demo icon
+through Settings; [tests/browser/screenshots/README.md](tests/browser/screenshots/README.md) says
+how to regenerate them.
+
+### Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+### License
 
 MIT, see [LICENSE](LICENSE).
+
