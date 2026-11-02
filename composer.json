@@ -1,13 +1,15 @@
 {
     "name": "restruct/silverstripe-favicons",
-    "description": "One PNG to every favicon, touch icon and web manifest variant browsers ask for, served at the paths they probe, on the frontend, in the CMS and on the login pages",
+    "description": "One PNG to every favicon, touch icon and web manifest icon browsers ask for, served at the paths they probe and linked on the site, in the CMS and on the login pages",
     "type": "silverstripe-vendormodule",
     "keywords": [
         "silverstripe",
+        "silverstripe-module",
+        "silverstripe-cms",
         "favicon",
         "apple-touch-icon",
         "webmanifest",
-        "icons"
+        "pwa-icons"
     ],
     "license": "MIT",
     "authors": [
