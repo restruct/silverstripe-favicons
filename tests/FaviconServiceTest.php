@@ -637,9 +637,22 @@ class FaviconServiceTest extends SapphireTest
         $tags = $s->getHeadTags();
         $this->assertStringContainsString('<link rel="icon" href="/favicon.ico?v=' . $v . '" sizes="32x32">', $tags);
         $this->assertStringContainsString('<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=' . $v . '">', $tags);
-        $this->assertStringContainsString('<link rel="manifest" href="/site.webmanifest?v=' . $v . '">', $tags);
+        # The manifest link carries crossorigin="use-credentials" since #5.
+        $this->assertStringContainsString('<link rel="manifest" href="/site.webmanifest?v=' . $v . '" crossorigin="use-credentials">', $tags);
         $this->assertStringContainsString('<meta name="theme-color" content="#abcdef">', $tags);
         $this->assertStringNotContainsString('image/svg+xml', $tags);
+    }
+
+    public function testManifestLinkSendsCredentials()
+    {
+        # #5: browsers fetch a manifest without credentials unless the link says otherwise, so behind
+        # HTTP Basic Auth (test/staging sites) it answered 401 while the icon links loaded fine.
+        $s = $this->service();
+        $s->warmUp();
+        $this->assertMatchesRegularExpression(
+            '#<link rel="manifest" href="/site\.webmanifest\?v=[^"]+" crossorigin="use-credentials">#',
+            $s->getHeadTags()
+        );
     }
 
     # Page renders never generate, and never fail
