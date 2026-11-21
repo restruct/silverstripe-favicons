@@ -637,7 +637,8 @@ class FaviconServiceTest extends SapphireTest
         $tags = $s->getHeadTags();
         $this->assertStringContainsString('<link rel="icon" href="/favicon.ico?v=' . $v . '" sizes="32x32">', $tags);
         $this->assertStringContainsString('<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=' . $v . '">', $tags);
-        $this->assertStringContainsString('<link rel="manifest" href="/site.webmanifest?v=' . $v . '">', $tags);
+        # The manifest link carries crossorigin="use-credentials" since #5.
+        $this->assertStringContainsString('<link rel="manifest" href="/site.webmanifest?v=' . $v . '" crossorigin="use-credentials">', $tags);
         $this->assertStringContainsString('<meta name="theme-color" content="#abcdef">', $tags);
         $this->assertStringNotContainsString('image/svg+xml', $tags);
     }
