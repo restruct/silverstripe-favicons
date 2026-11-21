@@ -1436,7 +1436,11 @@ class FaviconService
             $tags[] = '<link rel="apple-touch-icon" href="' . $url('apple-touch-icon.png') . '">';
         }
         if ($linked('site.webmanifest')) {
-            $tags[] = '<link rel="manifest" href="' . $url('site.webmanifest') . '">';
+            # crossorigin="use-credentials": browsers fetch a manifest in CORS mode without credentials,
+            # so behind HTTP Basic Auth it answered 401 (#5). Same-origin, it only adds the site's own
+            # credentials, so it is harmless without auth.
+//            $tags[] = '<link rel="manifest" href="' . $url('site.webmanifest') . '">';
+            $tags[] = '<link rel="manifest" href="' . $url('site.webmanifest') . '" crossorigin="use-credentials">';
         }
         $theme = (string) $this->getThemeColor();
         if ($theme !== '') {

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The web manifest failed with 401 behind HTTP Basic Auth** (#5): browsers fetch a manifest without
+  credentials unless its link asks for them. The `<link rel="manifest">` now carries
+  `crossorigin="use-credentials"`; on the site's own origin that is harmless without auth.
+
 ## 1.2.0 (2026-10-14)
 
 ### Added
