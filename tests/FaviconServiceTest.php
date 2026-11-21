@@ -642,6 +642,18 @@ class FaviconServiceTest extends SapphireTest
         $this->assertStringNotContainsString('image/svg+xml', $tags);
     }
 
+    public function testManifestLinkSendsCredentials()
+    {
+        # #5: browsers fetch a manifest without credentials unless the link says otherwise, so behind
+        # HTTP Basic Auth (test/staging sites) it answered 401 while the icon links loaded fine.
+        $s = $this->service();
+        $s->warmUp();
+        $this->assertMatchesRegularExpression(
+            '#<link rel="manifest" href="/site\.webmanifest\?v=[^"]+" crossorigin="use-credentials">#',
+            $s->getHeadTags()
+        );
+    }
+
     # Page renders never generate, and never fail
 
     public function testTagsNeedACompletedSetAndNeverGenerateOne()
